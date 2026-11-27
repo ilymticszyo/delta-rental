@@ -178,7 +178,8 @@ export function createFakeBackend(opts: { demo?: boolean; urlTtlMs?: number; now
   add('GET', '/owners', 'listOwners', async (a, r) => page(await a.ownerProfiles(), r.query))
 
   add('GET', '/rules/pricing', 'getPricingRule', (a) => a.getPricingRule())
-  add('PUT', '/rules/pricing', 'savePricingRule', (a, r) => a.savePricingRule(r.body.rule, r.body.summary))
+  add('POST', '/rules/pricing/preview', 'previewPricingRule', (a, r) => a.previewPricingRule(r.body.rule))
+  add('PUT', '/rules/pricing', 'savePricingRule', (a, r) => a.savePricingRule(r.body.rule, r.body.summary, r.body.baseVersion == null && r.body.previewToken == null ? undefined : { baseVersion: r.body.baseVersion, previewToken: r.body.previewToken }))
   add('GET', '/rules/valuation', 'getValuationRule', (a) => a.getValuationRule())
   add('PUT', '/rules/valuation', 'saveValuationRule', (a, r) => a.saveValuationRule(r.body.rule, r.body.summary))
   add('GET', '/rules/versions', 'ruleVersions', (a) => a.ruleHistory())
@@ -255,7 +256,7 @@ export function createFakeBackend(opts: { demo?: boolean; urlTtlMs?: number; now
       if (e instanceof ApiError) {
         const status = e.code === 401 && route.operationId === 'login' ? 401 : e.code
         const code = route.operationId === 'login' && status === 401 ? 'INVALID_CREDENTIALS' : route.operationId === 'login' && status === 403 ? 'USER_DISABLED' : (e.errorCode ?? errCode(status))
-        return { status, body: { error: { code, message: e.message, fields: e.fields } } }
+        return { status, body: { error: { code, message: e.message, fields: e.fields, ...(e.details ? { details: e.details } : {}) } } }
       }
       return { status: 500, body: { error: { code: 'INTERNAL', message: String((e as Error)?.message ?? e) } } }
     }

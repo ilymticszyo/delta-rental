@@ -11,7 +11,8 @@ import type {
 import { applyDicts, skinCategoryOf, type Dicts } from '../config/dictStore'
 import { isRetryable } from './idempotency'
 import { ApiError, type FieldError } from './errors'
-import type { Api, ApiFeatures, AuditLog, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PayableFilter, PricingOptions, SubmitOptions } from './types'
+import type { Api, ApiFeatures, AuditLog, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PayableFilter, PricingOptions, PricingRuleConfirm, PricingRuleSaveResult, SubmitOptions } from './types'
+import type { PricingRulePreview } from '../domain/reprice'
 
 export interface TokenStore { get(): string | null; set(token: string | null): void }
 /** 默认 token 存 localStorage（见契约「鉴权」一节的取舍说明） */
@@ -127,7 +128,8 @@ export class HttpApi implements Api {
     const fields: FieldError[] = Array.isArray(err?.fields) ? err.fields : []
     let message: string = err?.message || STATUS_MESSAGE[res.status] || `请求失败（${res.status}）`
     if (fields.length && !err?.message) message = fields.map((f) => f.message).join('；')
-    const apiErr = new ApiError(message, res.status, err?.code ?? `HTTP_${res.status}`, fields, err?.requestId ?? requestId)
+    const details = err?.details && typeof err.details === 'object' ? err.details : undefined
+    const apiErr = new ApiError(message, res.status, err?.code ?? `HTTP_${res.status}`, fields, err?.requestId ?? requestId, details)
     if (res.status === 401 && (o.auth ?? 'session') === 'session') {
       this.tokens.set(null)
       this.user = null
@@ -295,7 +297,14 @@ export class HttpApi implements Api {
 
   // ---------- 规则 ----------
   getPricingRule() { return this.get<PricingRule>('/rules/pricing') }
-  savePricingRule(rule: PricingRule, summary = '') { return this.put<PricingRule>('/rules/pricing', { rule, summary }) }
+  previewPricingRule(rule: PricingRule) {
+    return this.post<PricingRulePreview>('/rules/pricing/preview', { rule }).catch((e) => { throw notSupported(e, '后端暂未支持改价预览（POST /api/rules/pricing/preview 未实现）') })
+  }
+  async savePricingRule(rule: PricingRule, summary = '', confirm?: PricingRuleConfirm): Promise<PricingRuleSaveResult> {
+    const res = await this.put<PricingRuleSaveResult | PricingRule>('/rules/pricing', { rule, summary, ...(confirm ? { baseVersion: confirm.baseVersion, previewToken: confirm.previewToken } : {}) })
+    // 旧后端直接回 PricingRule（不重算库存）：repriced = null
+    return res && 'channelFeeRates' in res ? { rule: res as PricingRule, repriced: null } : (res as PricingRuleSaveResult)
+  }
   getValuationRule() { return this.get<ValuationRule>('/rules/valuation') }
   saveValuationRule(rule: ValuationRule, summary = '') { return this.put<ValuationRule>('/rules/valuation', { rule, summary }) }
   ruleHistory() { return this.get<{ pricing: RuleVersionMeta[]; valuation: RuleVersionMeta[] }>('/rules/versions') }

@@ -7,7 +7,7 @@ export interface FieldError { field: string; message: string }
  * errorCode = 机器可读错误码（见 docs/api-contract.md「错误」）；fields = 字段级错误。
  */
 export class ApiError extends Error {
-  constructor(message: string, public code = 400, public errorCode?: string, public fields: FieldError[] = [], public requestId?: string) {
+  constructor(message: string, public code = 400, public errorCode?: string, public fields: FieldError[] = [], public requestId?: string, public details?: Record<string, unknown>) {
     super(message)
     this.name = 'ApiError'
   }

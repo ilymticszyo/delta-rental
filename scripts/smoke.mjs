@@ -209,6 +209,37 @@ await check('运营：改整体市场系数 + 新增参考成交价 → 生成�
   await page.waitForSelector('text=熟客优惠')
   await shot('19-ops-rules-pricing')
 })
+await check('运营：改计价规则 → 预览受影响账号（新旧价、跳过租赁中）→ 确认后重算', async () => {
+  await go('/admin/rules')
+  await page.waitForSelector('text=熟客优惠')
+  const fee = page.locator('#pane-pricing .el-form-item:has(.el-form-item__label:text-is("附加服务费")) .el-input-number input')
+  await fee.fill('5'); await fee.blur()
+  await page.locator('#pane-pricing .el-form-item:has(label:text-is("修改说明")) input').fill('e2e：附加服务费 5 元')
+  await page.click('button.save-pricing')
+  const r = await Promise.race([
+    page.waitForSelector('.reprice-dialog .rp-affected', { timeout: 10000 }).then(() => 'preview'),
+    page.waitForSelector('.el-message-box:has-text("后端暂未支持改价预览")', { timeout: 10000 }).then(() => 'unsupported'),
+  ])
+  if (r === 'unsupported') {
+    await shot('19b-ops-reprice-unsupported')
+    await page.click('.el-message-box button:has-text("仍然保存")')
+    await page.waitForSelector('text=后端未重算现有库存')
+    return
+  }
+  const dlg = page.locator('.reprice-dialog')
+  await dlg.locator('text=/重算 \\d+ 个未出租账号/').waitFor()
+  await dlg.locator('.rp-affected .el-table__row >> text=/→/').first().waitFor()
+  await dlg.locator('.rp-skipped .el-table__row >> text=租赁中').first().waitFor()
+  const total = await dlg.locator('.rp-total').innerText()
+  if (!/^\+\d+ 元\/租期$/.test(total)) throw new Error(`合计差额应为正数：${total}`)
+  await shot('19b-ops-reprice-preview')
+  await dlg.locator('button.rp-confirm').click()
+  await page.waitForSelector('text=/计价规则已保存为 v\\d+：重算 \\d+ 个账号/')
+  await page.waitForSelector('text=e2e：附加服务费 5 元')
+  await go('/admin/inventory?status=listed')
+  await page.waitForSelector('.el-table__row >> text=v2')
+  await shot('19c-ops-inventory-after-reprice')
+})
 await check('运营：人工确认号主上架的待确认账号', async () => {
   await go('/admin/inventory?status=draft')
   await page.waitForSelector('.el-table__row >> text=号主寄租')

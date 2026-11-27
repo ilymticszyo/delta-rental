@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { LocalApi } from '../src/api/local'
 import { FORBIDDEN_OWNER_KEYS } from '../src/domain/visibility'
+import { toPricingInput as toInput } from '../src/mock/seed'
 import type { ValuationInput } from '../src/domain/types'
 
 let api: LocalApi
@@ -13,6 +14,10 @@ beforeEach(async () => {
 })
 const asset = (over: Partial<ValuationInput> = {}): ValuationInput => ({ contact: 'wx_s', region: 'QQ区', loginMethod: '扫码', coinAmount: 100, totalAssets: 150, level: 40, rank: '钻石', safeBox: 6, skins: [], banRecord: false, awmCount: 0, helmet6Count: 0, armor6Count: 0, experienceCardCount: 0, ...over })
 const listedConsign = async () => (await api.listAccounts()).find((a) => a.status === 'listed' && a.source === 'consign')!
+const saveWithPreview = async (rule: Awaited<ReturnType<LocalApi['getPricingRule']>>, summary = '') => {
+  const pv = await api.previewPricingRule(rule)
+  return api.savePricingRule(rule, summary, { baseVersion: pv.baseVersion, previewToken: pv.previewToken })
+}
 const order = (accountId: string, renterContact = 'wx_r', deposit = 0) => api.createOrder({ accountId, renterContact, startAt: new Date().toISOString(), rentalDays: 3, deposit, extraFee: 0, remark: '' })
 
 /** 深度扫描对象里是否出现禁用字段 */
@@ -287,20 +292,25 @@ describe('经营报表（C11）', () => {
 })
 
 describe('v0.3 契约对齐：按账号报价版本计价、订单详情、新建用户', () => {
-  it('改计价规则不影响已上架账号：预览 / 登记按账号报价所记版本计价，订单记 ruleVersion', async () => {
+  it('租赁中的账号改规则时被跳过：之后再出租仍按报价所记版本计价；订单记 ruleVersion', async () => {
     const a = await listedConsign()
     expect(a.quote.ruleVersion).toBe(1)
+    const o1 = await order(a.id, 'wx_new_renter')
     const rule = await api.getPricingRule()
     const rates = Object.fromEntries(Object.entries(rule.channelFeeRates).map(([k, v]) => [k, Math.min(90, v + 30)]))
-    await api.savePricingRule({ ...rule, channelFeeRates: rates }, '服务费大涨')
+    await saveWithPreview({ ...rule, channelFeeRates: rates }, '服务费大涨')
     expect((await api.getPricingRule()).version).toBe(2)
-    const pv = await api.previewOrder(a.id, 'wx_new_renter')
+    await api.cancelOrder(o1.id, '未交号')
+    const back = (await api.listAccounts()).find((x) => x.id === a.id)!
+    expect(back.status).toBe('listed')
+    expect(back.quote.ruleVersion).toBe(1)
+    const pv = await api.previewOrder(a.id, 'wx_new_renter2')
     expect(pv.ruleVersion).toBe(1)
     expect(pv.coinRent).toBe(a.quote.coinRent)
     expect(pv.ownerPayable).toBe(a.quote.ownerSettlement)
-    const o = await order(a.id, 'wx_new_renter')
+    const o = await order(a.id, 'wx_new_renter2')
     expect(o).toMatchObject({ ruleVersion: 1, coinRent: a.quote.coinRent, ownerPayable: a.quote.ownerSettlement })
-    // 编辑保存后才按新规则重算
+    // 编辑保存后按当前规则重算
     const { id, accountNo, quote, createdAt, updatedAt, deleted, cumulativeIncome, paybackPercent, ownerName, ...rest } = (await api.listAccounts()).find((x) => x.status === 'listed' && x.source === 'consign' && x.id !== a.id)!
     const saved = await api.saveAccount({ ...rest, id })
     expect(saved.quote.ruleVersion).toBe(2)
@@ -336,5 +346,104 @@ describe('v0.3 契约对齐：按账号报价版本计价、订单详情、新�
     const me = await api.login('zhao', 'zhao12345')
     expect(me.ownerId).toBe(ownerId)
     expect((await api.ownerAccounts()).length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('v0.4 改规则重算库存（预览 → 确认 → 原子重算）', () => {
+  const bump = async () => {
+    const rule = await api.getPricingRule()
+    return { ...rule, channelFeeRates: Object.fromEntries(Object.entries(rule.channelFeeRates).map(([k, v]) => [k, Math.min(90, v + 10)])), extraFee: { mode: 'fixed' as const, value: 5 } }
+  }
+  it('预览不落库；未出租账号进 affected（新价 = 按候选规则算的报价），租赁中 / 待结算进 skipped', async () => {
+    const a = await listedConsign()
+    const o = await order(a.id, 'wx_rp_1')
+    const before = localStorage.getItem('dr:v1:db')
+    const rule = await bump()
+    const pv = await api.previewPricingRule(rule)
+    expect(localStorage.getItem('dr:v1:db')).toBe(before)
+    expect(pv.baseVersion).toBe(1)
+    expect(pv.nextVersion).toBe(2)
+    expect(pv.previewToken).toMatch(/^pv1\.1\./)
+    const accs = (await api.listAccounts()).filter((x) => !x.deleted)
+    const inFlight = accs.filter((x) => x.status === 'rented' || x.status === 'settling')
+    expect(pv.skipped.map((x) => x.accountId).sort()).toEqual(inFlight.map((x) => x.id).sort())
+    expect(pv.skipped.find((x) => x.accountId === a.id)).toMatchObject({ reason: 'RENTED', ruleVersion: 1 })
+    expect(pv.affected.length).toBe(accs.length - inFlight.length)
+    expect(pv.affected.every((x) => !['rented', 'settling'].includes(x.status))).toBe(true)
+    const it0 = pv.affected[0]
+    const trial = await api.trialPricing({ ...toInput(accs.find((x) => x.id === it0.accountId)!) }, { ...rule, version: 2 })
+    expect(it0.newPrice.renterRent).toBe(trial.renterRent)
+    expect(it0.newPrice.ownerSettlement).toBe(trial.ownerSettlement)
+    expect(it0.delta).toBe(it0.newPrice.renterRent - it0.oldPrice.renterRent)
+    expect(pv.summary).toEqual({ affectedCount: pv.affected.length, changedCount: pv.affected.filter((x) => x.changed).length, skippedCount: pv.skipped.length, totalDelta: pv.affected.reduce((s, x) => s + x.delta, 0) })
+    expect(pv.summary.changedCount).toBeGreaterThan(0)
+    expect(pv.affected.every((x) => x.delta === 5 || x.changed)).toBe(true)
+    expect((await api.getOrder(o.id)).coinRent).toBe(o.coinRent)
+  })
+  it('确认保存：原子重算 affected、报价版本 +1；租赁中账号与已登记订单不动；写操作日志；新订单走新报价', async () => {
+    const a = await listedConsign()
+    const o = await order(a.id, 'wx_rp_2')
+    const ordersBefore = JSON.stringify((await api.listOrders()).map(({ reminder, ...x }: any) => x))
+    const rule = await bump()
+    const pv = await api.previewPricingRule(rule)
+    const res = await api.savePricingRule(rule, '服务费 +10、附加费 5', { baseVersion: pv.baseVersion, previewToken: pv.previewToken })
+    expect(res.rule.version).toBe(2)
+    expect(res.repriced).toEqual(pv.summary)
+    const accs = await api.listAccounts()
+    for (const x of pv.affected) {
+      const acc = accs.find((y) => y.id === x.accountId)!
+      expect(acc.quote.ruleVersion).toBe(2)
+      expect(acc.quote.renterRent).toBe(x.newPrice.renterRent)
+    }
+    expect(accs.find((y) => y.id === a.id)!.quote.ruleVersion).toBe(1)
+    expect(JSON.stringify((await api.listOrders()).map(({ reminder, ...x }: any) => x))).toBe(ordersBefore)
+    expect((await api.getOrder(o.id)).ruleVersion).toBe(1)
+    const log = (await api.auditLogs())[0]
+    expect(log.action).toBe('计价规则')
+    expect(log.summary).toContain('保存为 v2')
+    expect(log.summary).toContain(`重算 ${pv.summary.affectedCount} 个账号`)
+    expect(log.summary).toContain(`租赁中 ${pv.skipped.filter((x) => x.reason === 'RENTED').length}`)
+    const other = pv.affected.find((x) => x.status === 'listed' && x.changed)!
+    const o2 = await order(other.accountId, 'wx_rp_3')
+    expect(o2.ruleVersion).toBe(2)
+    expect(o2.coinRent).toBe(other.newPrice.coinRent)
+  })
+  it('缺少预览 → 422；版本变了 → 409 RULE_CONFLICT VERSION_CHANGED；预览后库存 / 规则变了 → 409 PREVIEW_STALE；失败不落库', async () => {
+    const rule = await bump()
+    await expect(api.savePricingRule(rule, 'x')).rejects.toMatchObject({ code: 422 })
+    const pv = await api.previewPricingRule(rule)
+    // 规则内容变了
+    await expect(api.savePricingRule({ ...rule, defaultDeposit: rule.defaultDeposit + 1 }, '', pv)).rejects.toMatchObject({ code: 409, errorCode: 'RULE_CONFLICT', details: { reason: 'PREVIEW_STALE' } })
+    // 库存变了（下架一个账号）
+    const a = await listedConsign()
+    await api.setAccountStatus(a.id, 'off')
+    const before = localStorage.getItem('dr:v1:db')
+    await expect(api.savePricingRule(rule, '', pv)).rejects.toMatchObject({ code: 409, errorCode: 'RULE_CONFLICT', details: { reason: 'PREVIEW_STALE' } })
+    expect(localStorage.getItem('dr:v1:db')).toBe(before)
+    // 重新预览后可保存；拿旧预览再保存 → 版本已变
+    const pv2 = await api.previewPricingRule(rule)
+    await api.savePricingRule(rule, '', pv2)
+    await expect(api.savePricingRule(rule, '', pv2)).rejects.toMatchObject({ code: 409, errorCode: 'RULE_CONFLICT', details: { reason: 'VERSION_CHANGED', currentVersion: 2 } })
+  })
+  it('新规则下算不出价的账号 → PRICING_ERROR 跳过并保留旧报价', async () => {
+    const rule = await api.getPricingRule()
+    const accs = await api.listAccounts()
+    const usedCycle = accs.find((x) => x.status === 'listed')!.cycle
+    const { [usedCycle]: _gone, ...cycles } = rule.cycleValues
+    const cand = { ...rule, cycleValues: cycles, ownerDefaults: { ...rule.ownerDefaults, cycle: Object.keys(cycles)[0] } }
+    const pv = await api.previewPricingRule(cand)
+    const bad = pv.skipped.filter((x) => x.reason === 'PRICING_ERROR')
+    expect(bad.length).toBe(accs.filter((x) => !x.deleted && x.cycle === usedCycle && !['rented', 'settling'].includes(x.status)).length)
+    expect(bad[0].message).toBeTruthy()
+    await api.savePricingRule(cand, '删周期', pv)
+    const after = await api.listAccounts()
+    for (const b of bad) expect(after.find((x) => x.id === b.accountId)!.quote.ruleVersion).toBe(b.ruleVersion)
+  })
+  it('只有运营 / 管理员能预览与保存', async () => {
+    const rule = await api.getPricingRule()
+    await as('cs')
+    await expect(api.previewPricingRule(rule)).rejects.toThrow('403')
+    await as('ops')
+    expect((await api.previewPricingRule(rule)).baseVersion).toBe(1)
   })
 })
