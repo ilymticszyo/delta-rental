@@ -1,6 +1,51 @@
 # API 对照
 
-> 已过时。请只看仓库根目录的 `docs/api-contract.md` 与 `docs/openapi.yaml`。下面是接入契约之前的旧草稿。
+> 路径与字段以仓库根目录的 `docs/api-contract.md` 与 `docs/openapi.yaml`（**0.3.2-draft**）为准。下面「未租重算」和「密码」两节是当前后端行为。其余表格是接入契约之前的旧草稿，路径已过时。
+
+## 未租重算（0.3.2）
+
+改计价规则并让库存跟上，分两步。权限与改规则相同：运营或管理员。金额是整数元。错误仍是 `{ error: { code, message, fields?, requestId? } }`。
+
+`PUT /api/rules/pricing` 只保存新版本，**不改**已有账号报价。
+
+### `POST /api/rules/pricing/preview`
+
+请求与保存规则相同：`{ "rule": PricingRule, "summary"?: string }`。`rule.version` 必须等于当前版本，否则 409 `VERSION_CONFLICT`。不落库。
+
+响应：
+
+```json
+{
+  "baseVersion": 1,
+  "fingerprint": "<sha256 hex>",
+  "count": 2,
+  "accounts": [
+    { "id": "a1", "accountNo": "DF1", "oldPrice": 500, "newPrice": 400, "delta": -100 }
+  ]
+}
+```
+
+`oldPrice` / `newPrice` 是折后纯币租金 `quote.coinRent`。`accountNo` 是账号编号。`delta` 可为负。`count` 包含价格没变的账号。只含未删除、且不是租赁中 / 待结算、也没有进行中订单（`active` / `settling`）的账号。一次返回全部，不分页。
+
+客服、号主、成员：403 `FORBIDDEN`。未登录：401 `UNAUTHENTICATED`。规则算不出价：422 `VALIDATION_FAILED`。
+
+### `POST /api/rules/pricing/apply`
+
+```json
+{
+  "rule": { "version": 1 },
+  "summary": "说明",
+  "confirm": true,
+  "baseVersion": 1,
+  "fingerprint": "<预览返回的 fingerprint>"
+}
+```
+
+`confirm` 不是 `true`：422 `VALIDATION_FAILED`，`fields` 里有 `confirm`。规则或库存相对预览变了：409 `STALE_PREVIEW`，不写入。
+
+成功时在同一个数据库事务里保存新规则版本、重写上面那些账号的报价（盖上新 `ruleVersion`）、写操作日志（版本变化和数量）。租赁中、待结算、有进行中订单的账号不动。
+
+响应：`{ "rule": PricingRule, "fromVersion": 1, "toVersion": 2, "repriced": 2 }`。
 
 ## 密码（与契约一致）
 

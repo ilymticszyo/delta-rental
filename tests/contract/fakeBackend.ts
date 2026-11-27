@@ -2,9 +2,12 @@
 // 用途：① 契约测试（tests/contract）② 本地以 http 模式跑完整前端（npm run fake-api）。
 // 不是生产后端：状态码粒度沿用 mock（多数业务错误为 400），真实后端须按契约用 409 / 422。
 import http from 'node:http'
-import { createHmac, randomBytes } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { LocalApi } from '../../src/api/local'
 import { ApiError } from '../../src/api/errors'
+import { calcPricing } from '../../src/domain/pricing'
+import { toPricingInput } from '../../src/mock/seed'
+import type { PricingRule } from '../../src/config/rules'
 import type { Attachment, NewAttachment } from '../../src/domain/types'
 
 class MemStorage {
@@ -28,6 +31,73 @@ const DB_KEY = 'dr:v1:db'
 const IDEMPOTENT_OPS = new Set(['createOrder', 'importAccounts', 'payOwner'])
 const stable = (v: unknown): string => Array.isArray(v) ? `[${v.map(stable).join(',')}]`
   : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable((v as any)[k])}`).join(',')}}` : JSON.stringify(v) ?? 'null'
+
+/** 与 backend/src/engine.ts 的预览 / 确认重算同一范围和指纹，供假后端路由表对齐契约。 */
+async function staffRule(api: LocalApi) {
+  const u = await api.currentUser()
+  if (!u) throw new ApiError('未登录', 401, 'UNAUTHENTICATED')
+  if (u.role !== 'ops' && u.role !== 'admin') throw new ApiError('无权限（403）', 403, 'FORBIDDEN')
+  await api.getPricingRule()
+  return u
+}
+function repriceView(db: any, rule: PricingRule) {
+  const busy = new Set((db.orders as any[]).filter((o) => o.status === 'active' || o.status === 'settling').map((o) => o.accountId))
+  const next = { ...rule, version: db.pricingRule.version + 1 }
+  const accounts = (db.accounts as any[])
+    .filter((a) => !a.deleted && a.status !== 'rented' && a.status !== 'settling' && !busy.has(a.id))
+    .sort((a, b) => String(a.accountNo).localeCompare(String(b.accountNo)))
+    .map((a) => {
+      const quote = calcPricing(toPricingInput(a), next)
+      return { id: a.id, accountNo: a.accountNo, oldPrice: a.quote.coinRent, newPrice: quote.coinRent, delta: quote.coinRent - a.quote.coinRent, quote, account: a }
+    })
+  const body = [
+    String(db.pricingRule.version),
+    stable(rule),
+    ...(db.accounts as any[]).filter((a) => !a.deleted).sort((a, b) => String(a.id).localeCompare(String(b.id))).map((a) =>
+      `${a.id}|${a.status}|${a.updatedAt}|${a.quote.ruleVersion}|${a.quote.coinRent}|${a.quote.totalAmount}`),
+    ...(db.orders as any[]).map((o) => `${o.id}|${o.accountId}|${o.status}`).sort(),
+  ].join('\n')
+  return { accounts, fingerprint: createHash('sha256').update(body).digest('hex') }
+}
+function previewReprice(storage: MemStorage, _user: unknown, rule: PricingRule) {
+  const db = JSON.parse(storage.getItem(DB_KEY) ?? 'null')
+  if (!rule || rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, 'VERSION_CONFLICT')
+  let view
+  try { view = repriceView(db, rule) }
+  catch (e) { throw new ApiError(e instanceof Error ? e.message : '计价失败', 422, 'VALIDATION_FAILED') }
+  return {
+    baseVersion: db.pricingRule.version,
+    fingerprint: view.fingerprint,
+    count: view.accounts.length,
+    accounts: view.accounts.map(({ id, accountNo, oldPrice, newPrice, delta }) => ({ id, accountNo, oldPrice, newPrice, delta })),
+  }
+}
+function applyReprice(storage: MemStorage, user: { username: string }, body: any) {
+  const db = JSON.parse(storage.getItem(DB_KEY) ?? 'null')
+  const rule = body.rule as PricingRule
+  if (!rule) throw new ApiError('缺少规则', 422, 'VALIDATION_FAILED', [{ field: 'rule', message: '缺少规则' }])
+  if (body.confirm !== true) throw new ApiError('需要确认后才会保存并重算', 422, 'VALIDATION_FAILED', [{ field: 'confirm', message: '请先预览并传 confirm=true' }])
+  let view
+  try { view = repriceView(db, rule) }
+  catch (e) { throw new ApiError(e instanceof Error ? e.message : '计价失败', 422, 'VALIDATION_FAILED') }
+  if (body.baseVersion !== db.pricingRule.version || body.fingerprint !== view.fingerprint)
+    throw new ApiError('预览已过期，规则或库存已变化，请重新预览', 409, 'STALE_PREVIEW')
+  if (rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, 'VERSION_CONFLICT')
+  const fromVersion = db.pricingRule.version
+  const next = { ...rule, version: fromVersion + 1 }
+  const t = new Date().toISOString()
+  db.pricingRule = next
+  db.pricingHistory.unshift({ version: next.version, savedAt: t, savedBy: user.username, summary: body.summary || '修改计价规则并重算未租账号', rule: JSON.parse(JSON.stringify(next)) })
+  let changed = 0
+  for (const row of view.accounts) {
+    if (row.newPrice !== row.oldPrice) changed++
+    row.account.quote = row.quote
+    row.account.updatedAt = t
+  }
+  db.audit.unshift({ at: t, actor: user.username, action: '计价规则', summary: `v${fromVersion} → v${next.version}，重算未租账号 ${view.accounts.length} 个（租金变化 ${changed} 个）${body.summary ? ' ' + body.summary : ''}` })
+  storage.setItem(DB_KEY, JSON.stringify(db))
+  return { rule: next, fromVersion, toVersion: next.version, repriced: view.accounts.length }
+}
 
 /**
  * proposed=false：模拟尚未实现提议项的后端（不注册 x-status: proposed 的操作，响应去掉提议字段，忽略提议参数）。
@@ -179,6 +249,8 @@ export function createFakeBackend(opts: { demo?: boolean; urlTtlMs?: number; now
 
   add('GET', '/rules/pricing', 'getPricingRule', (a) => a.getPricingRule())
   add('PUT', '/rules/pricing', 'savePricingRule', (a, r) => a.savePricingRule(r.body.rule, r.body.summary))
+  add('POST', '/rules/pricing/preview', 'previewPricingReprice', async (a, r) => previewReprice(storage, await staffRule(a), r.body?.rule))
+  add('POST', '/rules/pricing/apply', 'applyPricingReprice', async (a, r) => applyReprice(storage, await staffRule(a), r.body ?? {}))
   add('GET', '/rules/valuation', 'getValuationRule', (a) => a.getValuationRule())
   add('PUT', '/rules/valuation', 'saveValuationRule', (a, r) => a.saveValuationRule(r.body.rule, r.body.summary))
   add('GET', '/rules/versions', 'ruleVersions', (a) => a.ruleHistory())

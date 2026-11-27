@@ -657,6 +657,21 @@ app.put('/api/rules/pricing', wrap(async (req, res) => {
   const rule = (req.body?.rule ?? req.body) as PricingRule
   res.json(await writeDb((db) => engine.savePricingRule(db, u, rule, typeof req.body?.summary === 'string' ? req.body.summary : '')))
 }))
+app.post('/api/rules/pricing/preview', wrap(async (req, res) => {
+  const u = requireRoles(req, ['ops', 'admin'])
+  const rule = (req.body?.rule ?? req.body) as PricingRule
+  res.json(await readDb((db) => engine.previewPricingReprice(db, u, rule)))
+}))
+app.post('/api/rules/pricing/apply', wrap(async (req, res) => {
+  const u = requireRoles(req, ['ops', 'admin'])
+  res.json(await writeDb((db) => engine.applyPricingReprice(db, u, {
+    rule: req.body?.rule as PricingRule,
+    summary: typeof req.body?.summary === 'string' ? req.body.summary : '',
+    confirm: req.body?.confirm === true,
+    baseVersion: typeof req.body?.baseVersion === 'number' ? req.body.baseVersion : undefined,
+    fingerprint: typeof req.body?.fingerprint === 'string' ? req.body.fingerprint : '',
+  })))
+}))
 app.get('/api/rules/valuation', wrap(async (req, res) => {
   const u = requireRoles(req, ['ops', 'admin'])
   res.json(await readDb((db) => engine.getValuationRule(db, u)))

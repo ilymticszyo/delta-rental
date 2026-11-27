@@ -1,4 +1,5 @@
 // 业务规则与 src/api/local.ts 对齐：状态机、字段裁剪、计价估值、台账都在这里执行。
+import crypto from 'crypto'
 import { dicts, type PricingRule, type ValuationRule } from './domain/rules'
 import { IMPORT_MAX_ROWS, parseImport, type ImportContext } from './domain/importAccounts'
 import { calcPricing, PricingError } from './domain/pricing'
@@ -32,6 +33,9 @@ export function payableBalance(entries: OwnerPayableEntry[]): number {
 }
 
 const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)))
+const stableJson = (v: unknown): string => Array.isArray(v) ? `[${v.map(stableJson).join(',')}]`
+  : v && typeof v === 'object' ? `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`).join(',')}}`
+  : JSON.stringify(v) ?? 'null'
 const norm = (c: string) => c.trim().toLowerCase()
 const addDays = (iso: string, d: number) => new Date(new Date(iso).getTime() + d * DAY).toISOString()
 
@@ -678,6 +682,85 @@ export class Engine {
     db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: this.nowIso(), savedBy: u.username, summary: summary || '修改计价规则', rule: clone(db.pricingRule) })
     this.audit(db, u, '计价规则', `保存为 v${db.pricingRule.version} ${summary}`)
     return db.pricingRule
+  }
+  /** 未出租、且没有进行中订单的库存账号。租赁中 / 待结算，或挂着 active / settling 订单的，保留原报价。 */
+  private repriceTargets(db: Db) {
+    const busy = new Set(db.orders.filter((o) => o.status === 'active' || o.status === 'settling').map((o) => o.accountId))
+    return db.accounts
+      .filter((a) => !a.deleted && a.status !== 'rented' && a.status !== 'settling' && !busy.has(a.id))
+      .sort((a, b) => a.accountNo.localeCompare(b.accountNo))
+  }
+  private repriceFingerprint(db: Db, rule: PricingRule) {
+    const body = [
+      String(db.pricingRule.version),
+      stableJson(rule),
+      ...db.accounts.filter((a) => !a.deleted).sort((a, b) => a.id.localeCompare(b.id)).map((a) =>
+        `${a.id}|${a.status}|${a.updatedAt}|${a.quote.ruleVersion}|${a.quote.coinRent}|${a.quote.totalAmount}`),
+      ...db.orders.map((o) => `${o.id}|${o.accountId}|${o.status}`).sort(),
+    ].join('\n')
+    return crypto.createHash('sha256').update(body).digest('hex')
+  }
+  private planReprice(db: Db, nextRule: PricingRule) {
+    try {
+      return this.repriceTargets(db).map((a) => {
+        const quote = pricing(toPricingInput(a), nextRule)
+        return { account: a, id: a.id, accountNo: a.accountNo, oldPrice: a.quote.coinRent, newPrice: quote.coinRent, delta: quote.coinRent - a.quote.coinRent, quote }
+      })
+    } catch (e) {
+      if (e instanceof ApiError && !e.errorCode) throw new ApiError(e.message, 422, false, 'VALIDATION_FAILED')
+      throw e
+    }
+  }
+  /** 只读预览。price = 折后纯币租金 quote.coinRent（整数元）。 */
+  previewPricingReprice(db: Db, user: User | null, rule: PricingRule) {
+    this.need(user, 'rulesEdit')
+    if (!rule || rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
+    const nextRule = { ...clone(rule), version: db.pricingRule.version + 1 }
+    const planned = this.planReprice(db, nextRule)
+    const accounts = planned.map(({ id, accountNo, oldPrice, newPrice, delta }) => ({ id, accountNo, oldPrice, newPrice, delta }))
+    return { baseVersion: db.pricingRule.version, fingerprint: this.repriceFingerprint(db, rule), count: accounts.length, accounts }
+  }
+  /**
+   * 确认后在一次调用里保存新规则并重算未租账号。校验失败时恢复调用前的内存状态，
+   * 与 writeDb 的数据库事务回滚一致。
+   */
+  applyPricingReprice(db: Db, user: User | null, input: { rule: PricingRule; summary?: string; confirm?: boolean; baseVersion?: number; fingerprint?: string }) {
+    const u = this.need(user, 'rulesEdit')
+    if (!input.rule) throw new ApiError('缺少规则', 422, false, 'VALIDATION_FAILED', [{ field: 'rule', message: '缺少规则' }])
+    if (input.confirm !== true) throw new ApiError('需要确认后才会保存并重算', 422, false, 'VALIDATION_FAILED', [{ field: 'confirm', message: '请先预览并传 confirm=true' }])
+    if (input.baseVersion !== db.pricingRule.version || input.fingerprint !== this.repriceFingerprint(db, input.rule)) {
+      throw new ApiError('预览已过期，规则或库存已变化，请重新预览', 409, false, 'STALE_PREVIEW')
+    }
+    if (input.rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
+    const fromVersion = db.pricingRule.version
+    const nextRule = { ...clone(input.rule), version: fromVersion + 1 }
+    const planned = this.planReprice(db, nextRule)
+    const targets = planned.map((row) => row.account)
+    const backup = {
+      pricingRule: db.pricingRule,
+      pricingHistory: db.pricingHistory,
+      audit: db.audit,
+      rows: targets.map((a) => ({ account: a, quote: a.quote, updatedAt: a.updatedAt })),
+    }
+    try {
+      const t = this.nowIso()
+      db.pricingRule = nextRule
+      db.pricingHistory = [{ version: nextRule.version, savedAt: t, savedBy: u.username, summary: input.summary || '修改计价规则并重算未租账号', rule: clone(nextRule) }, ...db.pricingHistory]
+      let changed = 0
+      for (const row of planned) {
+        if (row.quote.coinRent !== row.account.quote.coinRent) changed++
+        row.account.quote = row.quote
+        row.account.updatedAt = t
+      }
+      this.audit(db, u, '计价规则', `v${fromVersion} → v${nextRule.version}，重算未租账号 ${planned.length} 个（租金变化 ${changed} 个）${input.summary ? ' ' + input.summary : ''}`)
+      return { rule: db.pricingRule, fromVersion, toVersion: nextRule.version, repriced: planned.length }
+    } catch (e) {
+      db.pricingRule = backup.pricingRule
+      db.pricingHistory = backup.pricingHistory
+      db.audit = backup.audit
+      for (const row of backup.rows) { row.account.quote = row.quote; row.account.updatedAt = row.updatedAt }
+      throw e
+    }
   }
   getValuationRule(db: Db, user: User | null) {
     this.need(user, 'rulesEdit')
