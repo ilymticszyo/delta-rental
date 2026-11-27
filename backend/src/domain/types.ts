@@ -255,6 +255,8 @@ export interface RentalOrder {
   deposit: number
   totalAmount: number
   ownerPayable: number // 本单号主应付（自收号为 0）
+  /** 登记时账号报价快照的 ruleVersion */
+  ruleVersion?: number
   regularApplied: boolean
   handedOver: boolean
   returned: boolean

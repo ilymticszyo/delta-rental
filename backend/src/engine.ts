@@ -190,10 +190,16 @@ export class Engine {
     if (left <= db.pricingRule.expiryRemindHours * 3600000) return 'expiring'
     return null
   }
+  /** 账号报价快照上的规则版本。改规则不改已上架账号的价格；缺快照时用当前规则。 */
+  private pricingRuleAt(db: Db, version: number | undefined) {
+    if (version == null || version === db.pricingRule.version) return db.pricingRule
+    return db.pricingHistory.find((h) => h.version === version)?.rule ?? db.pricingRule
+  }
   private orderQuote(db: Db, a: Account, renterContact: string) {
     const tag = this.renterTag(db, renterContact)
-    const q = pricing(toPricingInput(a, tag === 'regular'), db.pricingRule)
-    return { tag, q }
+    const rule = this.pricingRuleAt(db, a.quote?.ruleVersion)
+    const q = pricing(toPricingInput(a, tag === 'regular'), rule)
+    return { tag, q, rule }
   }
   private ownerAccountInput(db: Db, ownerId: string, asset: ValuationInput, assistTime: string, remark: string): AccountInput {
     const d = db.pricingRule.ownerDefaults
@@ -432,6 +438,7 @@ export class Engine {
     return {
       profile: this.renterProfile(db, renterContact), blocked: tag === 'blacklist', coinRent: q.coinRent, extraFee: q.extraFee, deposit: q.deposit,
       ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, rentalDays: q.rentalDays, regularApplied: q.regularDiscountApplied, depositWaived: q.depositWaived,
+      ruleVersion: q.ruleVersion,
     }
   }
   createOrder(db: Db, user: User | null, input: OrderInput) {
@@ -441,7 +448,7 @@ export class Engine {
     if (db.orders.some((o) => o.accountId === a.id && (o.status === 'active' || o.status === 'settling')))
       throw new ApiError('该账号已有进行中的订单', 409)
     if (!input.renterContact.trim()) throw new ApiError('请填写租客联系方式')
-    const { tag, q } = this.orderQuote(db, a, input.renterContact)
+    const { tag, q, rule } = this.orderQuote(db, a, input.renterContact)
     if (tag === 'blacklist') {
       const r = db.renters.find((x) => norm(x.contact) === norm(input.renterContact))
       this.audit(db, actor, '拦截黑名单', `${input.renterContact.trim()} 尝试租 ${a.accountNo}`)
@@ -450,7 +457,7 @@ export class Engine {
     if (!(input.rentalDays >= 1)) throw new ApiError('租期至少 1 天')
     if (input.deposit < 0 || input.extraFee < 0) throw new ApiError('金额不能为负')
     const regular = tag === 'regular'
-    const deposit = regular && db.pricingRule.regularWaiveDeposit ? 0 : Math.round(input.deposit)
+    const deposit = regular && rule.regularWaiveDeposit ? 0 : Math.round(input.deposit)
     const extraFee = Math.round(input.extraFee)
     db.seq.order++
     const at = this.nowIso()
@@ -458,14 +465,14 @@ export class Engine {
       id: `o${db.seq.order}`, orderNo: `ZD${String(db.seq.order).padStart(5, '0')}`, accountId: a.id, accountNo: a.accountNo,
       renterContact: input.renterContact.trim(), startAt: input.startAt, endAt: addDays(input.startAt, input.rentalDays),
       rentalDays: input.rentalDays, coinRent: q.coinRent, extraFee, deposit, totalAmount: q.coinRent + extraFee + deposit,
-      ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, regularApplied: regular, handedOver: false, returned: false,
+        ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, ruleVersion: q.ruleVersion, regularApplied: regular, handedOver: false, returned: false,
       status: 'active', remark: input.remark, deposits: [], events: [], createdBy: actor.username, createdAt: at,
     }
     this.event(o, 'register', `登记 ${o.rentalDays} 天，租金 ${o.coinRent}${regular ? '（熟客优惠）' : ''}${tag === 'caution' ? '【慎租】' : ''}`, actor.username)
     if (deposit > 0) {
       o.deposits.push({ type: 'collect', amount: deposit, reason: '收取押金', at, operator: actor.username })
       this.event(o, 'collect', `收押金 ${deposit}`, actor.username)
-    } else if (regular && db.pricingRule.regularWaiveDeposit) this.event(o, 'collect', '熟客免押金', actor.username)
+    } else if (regular && rule.regularWaiveDeposit) this.event(o, 'collect', '熟客免押金', actor.username)
     db.orders.unshift(o)
     if (o.ownerPayable) this.addPayable(db, a, o, 'accrue', o.ownerPayable, '订单登记计提', actor.username)
     a.status = 'rented'

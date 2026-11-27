@@ -17,7 +17,7 @@ export async function seed(opts?: { force?: boolean }) {
       admin.username = config.adminUsername
       admin.password = config.adminPassword
     }
-    for (const u of db.users) u.password = await bcrypt.hash(u.password, 10)
+    for (const u of db.users) u.password = await bcrypt.hash(u.password, 8)
     await saveDb(tx, db)
     return { seeded: true }
   }, { timeout: 60000, maxWait: 10000 })

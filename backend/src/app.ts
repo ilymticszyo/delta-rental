@@ -1,4 +1,5 @@
 import crypto from 'crypto'
+import fs from 'fs'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import multer, { MulterError } from 'multer'
 import bcrypt from 'bcryptjs'
@@ -11,6 +12,7 @@ import { Engine, toPublicUser } from './engine'
 import { ApiError, type FieldError } from './errors'
 import { prisma, readDb, writeDb } from './persistence'
 import { seed } from './seed'
+import { openapiYamlPath } from './openapi'
 import { DiskAttachmentStore, safeUploadPath, writeImageBuffer } from './uploads'
 
 const engine = new Engine()
@@ -25,20 +27,22 @@ const IDEM_TTL = 24 * 3600000
 
 function sha256(s: string) { return crypto.createHash('sha256').update(s).digest('hex') }
 function requestId() { return crypto.randomBytes(4).toString('hex') }
-function signUpload(id: string, ttlSec = 3600) {
-  const exp = Math.floor(Date.now() / 1000) + ttlSec
+function signedUpload(id: string, ttlMs = 3600_000) {
+  const expMs = Date.now() + ttlMs
+  const exp = String(expMs)
   const sig = crypto.createHmac('sha256', config.jwtSecret).update(`${id}.${exp}`).digest('hex')
-  return `/api/uploads/${id}/content?exp=${exp}&sig=${sig}`
+  return { url: `/api/uploads/${id}/content?exp=${exp}&sig=${sig}`, expiresAt: new Date(expMs).toISOString() }
 }
 function verifyUpload(id: string, expRaw: unknown, sigRaw: unknown) {
   const exp = Number(expRaw)
   const sig = String(sigRaw ?? '')
-  if (!Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false
+  if (!Number.isFinite(exp) || exp < Date.now()) return false
   const expect = crypto.createHmac('sha256', config.jwtSecret).update(`${id}.${exp}`).digest('hex')
   const a = Buffer.from(expect)
   const b = Buffer.from(sig)
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
+const IDEM_KEY = /^[A-Za-z0-9_-]{8,128}$/
 
 app.use((req, res, next) => {
   const id = requestId()
@@ -117,7 +121,10 @@ app.use(async (req, res, next) => {
       return sendError(res, 401, 'UNAUTHENTICATED', '登录已失效，请重新登录')
     }
     const slide = new Date(Math.min(now.getTime() + SLIDE, session.absoluteExpiresAt.getTime()))
-    await prisma.session.update({ where: { tokenHash }, data: { lastSeenAt: now, expiresAt: slide } })
+    // 1 分钟内不写库，避免每个请求都续期。快到期时才把 expiresAt 往后推。
+    if (now.getTime() - session.lastSeenAt.getTime() > 60_000 || session.expiresAt.getTime() - now.getTime() < 3600_000) {
+      await prisma.session.update({ where: { tokenHash }, data: { lastSeenAt: now, expiresAt: slide } })
+    }
     req.user = toPublicUser({ username: row.username, displayName: row.displayName, role: row.role as Role, ownerId: row.ownerId ?? undefined })
     next()
   } catch (e) { next(e) }
@@ -181,7 +188,8 @@ function present(v: unknown): unknown {
     if (k === 'attachments' && Array.isArray(x)) {
       o.attachments = x.map((a) => {
         const att = a as Attachment & { mime?: string; size?: number }
-        const out: Record<string, unknown> = { id: att.id, name: att.name, url: signUpload(att.id), uploadedBy: att.uploadedBy, at: att.at }
+        const signed = signedUpload(att.id)
+        const out: Record<string, unknown> = { id: att.id, name: att.name, url: signed.url, expiresAt: signed.expiresAt, uploadedBy: att.uploadedBy, at: att.at }
         if (att.mime) out.mime = att.mime
         if (att.size) out.size = att.size
         return out
@@ -204,6 +212,7 @@ async function revokeUser(username: string) { await prisma.session.deleteMany({ 
 async function idemLookup(req: Request, route: string) {
   const key = req.get('Idempotency-Key')
   if (!key) return null
+  if (!IDEM_KEY.test(key)) throw new ApiError('Idempotency-Key 须为 8–128 位字母、数字、下划线或连字符', 422, false, 'VALIDATION_FAILED', [{ field: 'Idempotency-Key', message: '格式无效' }])
   const username = actor(req)!.username
   const id = sha256(`${username}\n${route}\n${key}`)
   const bodyHash = sha256(JSON.stringify(req.body ?? null))
@@ -240,6 +249,12 @@ async function markBound(accountId: string, ids: string[], previous: string[] = 
   for (const id of previous) if (!next.has(id)) await prisma.upload.update({ where: { id }, data: { accountId: null } }).catch(() => undefined)
   for (const id of ids) await prisma.upload.update({ where: { id }, data: { accountId } }).catch(() => undefined)
 }
+
+app.get('/api/openapi.yaml', (_req, res) => {
+  const file = openapiYamlPath()
+  if (!file) return sendError(res, 404, 'NOT_FOUND', '未找到 openapi.yaml')
+  res.type('yaml').send(fs.readFileSync(file, 'utf8'))
+})
 
 app.get('/api/meta', wrap(async (_req, res) => {
   const demo = config.enableDemoAccounts
@@ -331,6 +346,14 @@ app.post('/api/valuation/quote', wrap(async (req, res) => {
   const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
   res.json(await readDb((db) => engine.calcValuation(db, u, req.body as ValuationInput)))
 }))
+app.get('/api/dicts', wrap(async (req, res) => {
+  requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const { dicts } = await import('./domain/rules')
+  res.json({
+    regions: dicts.regions, loginMethods: dicts.loginMethods, ranks: dicts.ranks, safeBoxes: dicts.safeBoxes,
+    stamina: dicts.stamina, loads: dicts.loads, skins: dicts.skins,
+  })
+}))
 app.get('/api/cs-agents', wrap(async (req, res) => {
   const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
   res.json(await readDb((db) => engine.listCsAgents(db, u)))
@@ -409,7 +432,7 @@ app.post('/api/accounts/import', wrap(async (req, res) => {
   const u = requireRoles(req, ['ops', 'admin'])
   const route = 'POST /api/accounts/import'
   const idem = await idemLookup(req, route)
-  if (idem?.replay) { res.status(idem.replay.statusCode).json(idem.replay.body); return }
+  if (idem?.replay) { res.setHeader('Idempotent-Replayed', 'true'); res.status(idem.replay.statusCode).json(idem.replay.body); return }
   const rows = req.body?.rows
   const fileName = String(req.body?.fileName ?? 'import.xlsx')
   if (req.body?.dryRun === true) {
@@ -476,7 +499,23 @@ app.post('/api/uploads', imgUpload.single('file'), wrap(async (req, res) => {
     await import('fs').then((fs) => fs.promises.rm(safeUploadPath(saved.relPath), { force: true }))
     throw e
   }
-  res.status(201).json({ id: saved.id, name: saved.name, url: signUpload(saved.id), mime: saved.mime, size: saved.bytes, uploadedBy: saved.uploadedBy, at: saved.createdAt.toISOString() })
+  const signed = signedUpload(saved.id)
+  res.status(201).json({ id: saved.id, name: saved.name, url: signed.url, expiresAt: signed.expiresAt, mime: saved.mime, size: saved.bytes, uploadedBy: saved.uploadedBy, at: saved.createdAt.toISOString() })
+}))
+app.get('/api/uploads/:id', wrap(async (req, res) => {
+  const u = requireRoles(req, ['owner', 'cs', 'ops', 'admin'])
+  if (!/^[a-f0-9]{32}$/.test(req.params.id)) throw new ApiError('截图不存在', 404, false, 'NOT_FOUND')
+  const row = await prisma.upload.findUnique({ where: { id: req.params.id } })
+  if (!row) throw new ApiError('截图不存在', 404, false, 'NOT_FOUND')
+  let visible = row.uploadedBy === u.username
+  if (!visible && row.accountId && u.role !== 'owner') visible = true
+  if (!visible && row.accountId && u.role === 'owner') {
+    const acc = await readDb((db) => db.accounts.find((a) => a.id === row.accountId && !a.deleted))
+    visible = !!acc && (acc.ownerId === u.ownerId || acc.formerOwnerId === u.ownerId)
+  }
+  if (!visible) throw new ApiError('截图不存在', 404, false, 'NOT_FOUND')
+  const signed = signedUpload(row.id)
+  res.json({ id: row.id, name: row.name, url: signed.url, expiresAt: signed.expiresAt, mime: row.mime, size: row.bytes, uploadedBy: row.uploadedBy, at: row.createdAt.toISOString() })
 }))
 app.get('/api/uploads/:id/content', wrap(async (req, res) => {
   if (!/^[a-f0-9]{32}$/.test(req.params.id) || !verifyUpload(req.params.id, req.query.exp, req.query.sig))
@@ -509,7 +548,7 @@ app.post('/api/orders', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
   const route = 'POST /api/orders'
   const idem = await idemLookup(req, route)
-  if (idem?.replay) { res.status(idem.replay.statusCode).json(idem.replay.body); return }
+  if (idem?.replay) { res.setHeader('Idempotent-Replayed', 'true'); res.status(idem.replay.statusCode).json(idem.replay.body); return }
   assertDateTime(req.body?.startAt, 'startAt')
   assertMoney(req.body?.deposit, 'deposit')
   assertMoney(req.body?.extraFee, 'extraFee')
@@ -555,7 +594,7 @@ app.post('/api/orders/:id/owner-payments', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
   const route = `POST /api/orders/${req.params.id}/owner-payments`
   const idem = await idemLookup(req, route)
-  if (idem?.replay) { res.status(idem.replay.statusCode).json(idem.replay.body); return }
+  if (idem?.replay) { res.setHeader('Idempotent-Replayed', 'true'); res.status(idem.replay.statusCode).json(idem.replay.body); return }
   assertMoney(req.body?.amount, 'amount')
   const order = await writeDb((db) => engine.payOwner(db, u, req.params.id, Number(req.body?.amount), String(req.body?.note ?? '')))
   const body = present(order)
@@ -573,6 +612,7 @@ app.post('/api/orders/:id/cancel', wrap(async (req, res) => {
 app.get('/api/payables', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
   let items = await readDb((db) => engine.listPayables(db, u, qstr(req.query.ownerId) || undefined))
+  if (qstr(req.query.orderId)) items = items.filter((p) => p.orderId === req.query.orderId)
   const q = qstr(req.query.q).toLowerCase()
   if (q) items = items.filter((p) => `${p.accountNo} ${p.orderNo ?? ''} ${p.note}`.toLowerCase().includes(q))
   items = sorted(items, req.query.sort, ['at', 'createdAt', 'amount', 'accountNo'], '-createdAt', { createdAt: 'at' })
@@ -681,6 +721,10 @@ app.post('/api/demo/reset', wrap(async (req, res) => {
   await prisma.session.deleteMany()
   res.status(204).end()
 }))
+
+app.use('/api', (req, res) => {
+  sendError(res, 404, 'NOT_FOUND', `接口不存在 ${req.method} ${req.path}`)
+})
 
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {

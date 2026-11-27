@@ -158,6 +158,22 @@ describe('订单、押金与号主应付', () => {
     assert.ok(db.payables.some((p) => p.orderId === order.id && p.type === 'reverse'))
     assert.equal(order.deposits.some((d) => d.type === 'refund'), true)
   })
+  it('登记订单使用账号报价当时的规则版本，不跟后来保存的规则', () => {
+    const { db, eng, as } = setup()
+    const ops = as('ops')
+    const acc = db.accounts.find((a) => a.status === 'listed' && a.source === 'consign')!
+    const oldRent = acc.quote.coinRent
+    const ver = acc.quote.ruleVersion
+    const current = eng.getPricingRule(db, ops)
+    eng.savePricingRule(db, ops, { ...current, discountTiers: [{ threshold: 0, ratioPlus: 0, discount: 50 }], triggerMetric: 'coinAmount' }, '全场五折')
+    const preview = eng.previewOrder(db, as('cs'), acc.id, 'wx_hist_rule')
+    assert.equal(preview.ruleVersion, ver)
+    assert.equal(preview.coinRent, oldRent)
+    const order = eng.createOrder(db, as('cs'), { accountId: acc.id, renterContact: 'wx_hist_rule', startAt: new Date(NOW).toISOString(), rentalDays: 2, deposit: 0, extraFee: 0, remark: '' })
+    assert.equal(order.ruleVersion, ver)
+    assert.equal(order.coinRent, oldRent)
+    assert.equal(order.ownerPayable, acc.quote.ownerSettlement)
+  })
   it('Q8：租期只改到期日，不改租金；天数来自周期字典且不参与金额', () => {
     const { db, eng, as } = setup()
     const cs = as('cs')
