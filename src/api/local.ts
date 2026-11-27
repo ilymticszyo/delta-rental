@@ -12,8 +12,9 @@ import type {
   OwnerProfile, PricingInput, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder, StaffCreateInput, StaffUser, User, ValuationInput,
 } from '../domain/types'
 import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL, ROLE_LABEL } from '../domain/types'
+import { planReprice, type PricingRulePreview } from '../domain/reprice'
 import { buildSeedDb, demoUsers, SEED_VERSION, toPricingInput, type Db, type DbUser } from '../mock/seed'
-import type { Api, ApiFeatures, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PricingOptions } from './types'
+import type { Api, ApiFeatures, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PricingOptions, PricingRuleConfirm, PricingRuleSaveResult } from './types'
 
 const DB_KEY = 'dr:v1:db'
 const SESSION_KEY = 'dr:v1:session'
@@ -721,13 +722,32 @@ export class LocalApi implements Api {
 
   // ---------- 规则 ----------
   async getPricingRule() { this.need('inventoryView'); return clone(this.load().pricingRule) }
-  async savePricingRule(rule: PricingRule, summary = '') {
+  /** 改规则预览：不落库 */
+  async previewPricingRule(rule: PricingRule): Promise<PricingRulePreview> {
+    this.need('rulesEdit')
+    const db = this.load()
+    return planReprice(db.accounts, db.pricingRule.version, clone(rule), (a) => toPricingInput(a)).preview
+  }
+  async savePricingRule(rule: PricingRule, summary = '', confirm?: PricingRuleConfirm): Promise<PricingRuleSaveResult> {
     const u = this.need('rulesEdit')
+    if (!confirm || !Number.isInteger(confirm.baseVersion) || !confirm.previewToken)
+      throw new ApiError('请先预览受影响的账号再保存（缺少 baseVersion / previewToken）', 422, 'VALIDATION_FAILED', [{ field: 'previewToken', message: '必填' }])
     return this.tx((db) => {
-      db.pricingRule = { ...clone(rule), version: db.pricingRule.version + 1 }
-      db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: nowIso(), savedBy: u.username, summary: summary || '修改计价规则', rule: clone(db.pricingRule) })
-      this.audit(db, '计价规则', `保存为 v${db.pricingRule.version} ${summary}`)
-      return db.pricingRule
+      const cur = db.pricingRule.version
+      if (confirm.baseVersion !== cur)
+        throw new ApiError(`计价规则已被他人保存为 v${cur}，请重新预览`, 409, 'RULE_CONFLICT', [], undefined, { reason: 'VERSION_CHANGED', currentVersion: cur })
+      const { preview, updates, candidate } = planReprice(db.accounts, cur, clone(rule), (a) => toPricingInput(a))
+      if (preview.previewToken !== confirm.previewToken)
+        throw new ApiError('预览之后库存或规则有变化，请重新预览', 409, 'RULE_CONFLICT', [], undefined, { reason: 'PREVIEW_STALE', currentVersion: cur })
+      const t = nowIso()
+      for (const { account, quote } of updates) { account.quote = quote; account.updatedAt = t }
+      db.pricingRule = candidate
+      db.pricingHistory.unshift({ version: candidate.version, savedAt: t, savedBy: u.username, summary: summary || '修改计价规则', rule: clone(candidate) })
+      const sm = preview.summary
+      const by = (r: string) => preview.skipped.filter((x) => x.reason === r).length
+      const sign = sm.totalDelta > 0 ? '+' : ''
+      this.audit(db, '计价规则', `保存为 v${candidate.version} ${summary}；重算 ${sm.affectedCount} 个账号（价格变动 ${sm.changedCount}，租客应付合计 ${sign}${sm.totalDelta} 元/租期），跳过 ${sm.skippedCount}（租赁中 ${by('RENTED')}、待结算 ${by('SETTLING')}、无法计价 ${by('PRICING_ERROR')}）`.replace(/\s+；/, '；'))
+      return { rule: clone(candidate), repriced: sm }
     })
   }
   async getValuationRule() { this.need('rulesEdit'); return clone(this.load().valuationRule) }

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: 三角洲行动 · 账号租赁与回收估值 API
-  version: 0.3.2-draft
+  version: 0.4.0-draft
   description: |
     前端（Vue，src/api/http.ts）与后端之间的契约。人类可读说明见 docs/api-contract.md，两者冲突时以本文件为准并修正另一份。
 
@@ -13,7 +13,7 @@ info:
     - 错误：`{ "error": { "code", "message", "fields"?, "details"?, "requestId"? } }`。
     - 幂等：`POST /orders`、`POST /accounts/import`（dryRun=false）、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`（服务端保留 24 小时）。同键同请求体 → 重放首次响应（同状态码与响应体，带 `Idempotent-Replayed: true`）；同键不同请求体 → 409 `DUPLICATE`。
     - `x-status: proposed`：前端提议、后端尚未确认 / 实现的操作、参数或字段。客户端对其缺失做了降级（404 / 501 → 提示“后端暂未支持”或回退），契约测试的“每个操作都被用到”检查不包含它们。
-    - **0.3.2 新增**（标了 `x-client-unused`，前端尚未接入）：`POST /rules/pricing/preview` 与 `POST /rules/pricing/apply`。改计价规则并重算未租库存必须走这两步；`PUT /rules/pricing` 仍只保存规则、不改已有报价。
+    - v0.4：改计价规则先 `POST /rules/pricing/preview`，再 `PUT /rules/pricing` 带回 `baseVersion` 与 `previewToken`。同一事务里重算未出租库存。`previewToken` 为 HMAC-SHA256，客户端只原样带回。
     - 号主应付台账（/payables）与操作日志（/audit-logs）的 `sort` 接受 `createdAt` 作为 `at` 的别名。
     - 每个操作的 `x-roles` 列出允许的角色（owner 号主 / member 内部成员 / cs 客服 / ops 运营 / admin 管理员）；不在列表中的已登录角色返回 403。
     - 服务端是权限、字段裁剪、算价 / 估值、导入校验与状态流转的唯一权威；客户端算出的任何金额只作预览，服务端忽略并重算。
@@ -654,53 +654,40 @@ paths:
     put:
       tags: [rules]
       operationId: savePricingRule
-      summary: 保存计价规则 → 生成新版本（version = 当前 + 1）
+      summary: 保存计价规则 → 生成新版本（version = 当前 + 1），并按新规则原子重算未出租库存
       description: |
-        请求体 rule.version 必须等于当前版本，否则 409 VERSION_CONFLICT（乐观锁）。
-        本接口不改已有账号报价。要按新规则重算未租库存，走 POST /rules/pricing/preview 再 POST /rules/pricing/apply（0.3.2）。
+        v0.4 起必须先调 POST /rules/pricing/preview，再带回其 baseVersion 与 previewToken 保存（缺少 → 422 VALIDATION_FAILED）。
+        服务端在同一事务里：
+          1. baseVersion ≠ 当前版本 → 409 RULE_CONFLICT，details.reason = VERSION_CHANGED（取代原 VERSION_CONFLICT；rule.version 被忽略，新版本由服务端定）。
+          2. 用当前库存重新计算预览令牌，与 previewToken 不一致（预览后规则内容、任一账号的状态 / updatedAt / 报价版本有变化）→ 409 RULE_CONFLICT，details.reason = PREVIEW_STALE。
+          3. 规则版本 +1、记 RuleVersionMeta；对预览里 affected 的每个账号把 quote 重算为新规则快照（quote.ruleVersion = 新版本，updatedAt 刷新）；skipped 的账号与所有已登记订单一律不动。
+          4. 写一条操作日志「计价规则」：新版本、说明、重算数 / 变动数 / 合计差额、跳过数（按原因）。
+        任一步失败整体回滚。
       x-roles: [ops, admin]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRuleSave' } } } }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRule' } } } }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRuleSaveResult' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
   /rules/pricing/preview:
     post:
       tags: [rules]
-      operationId: previewPricingReprice
-      x-client-unused: true
-      summary: 【0.3.2 新增】预览未租账号在新计价规则下的价格（不落库）
+      operationId: previewPricingRule
+      summary: 改规则预览：按候选规则重算库存报价，列出受影响 / 跳过的账号（不落库）
       description: |
-        干跑。请求体与 PUT /rules/pricing 相同（`{ rule, summary? }`，`rule.version` 必须等于当前版本，否则 409 VERSION_CONFLICT）。
-        只列出将被重算的账号：未删除，且状态不是 rented / settling，也没有 status 为 active / settling 的订单。租赁中、待结算、以及挂着进行中订单的账号不出现。
-        `oldPrice` / `newPrice` 是折后纯币租金 `quote.coinRent`（整数元），`delta = newPrice - oldPrice`（可为负）。`count` 含价格不变（delta 为 0）的账号，因为确认后它们也会盖上新的 ruleVersion。
-        一次返回全部受影响账号，不分页。
-        `fingerprint` 是 SHA-256（hex）。输入为：当前规则版本、提议规则的稳定 JSON、每条未删除账号的 id/状态/更新时间/报价版本/coinRent/totalAmount、每条订单的 id/accountId/status。规则正文或库存相对预览有变化时，确认保存会得到 409 STALE_PREVIEW。
+        范围：未删除且 status ∈ {draft, listed, off, held} 的账号（含寄租与自收）进 affected，按候选规则、非熟客口径重算报价（与保存账号时同一实现）。
+        status = rented → skipped（RENTED），settling → skipped（SETTLING）：订单在途，报价不动；新规则下算不出价（周期 / 渠道被删、自定义折扣超出新范围）→ skipped（PRICING_ERROR，附 message），保留旧报价。
+        价格变化为 0 的账号也在 affected 里（changed=false），保存时同样把报价版本升到新版本。
+        previewToken 不透明，客户端只原样带回。实现为 HMAC-SHA256（与上传签名同一密钥），输入为 baseVersion、去掉 version 的规范化候选规则、每个未删除账号的 id/status/updatedAt/quote.ruleVersion。形如 pv1.{baseVersion}.{hex}。保存时重算比对，服务端无需存储；也可加有效期。
+        不分页（库存量级为数百）。请求体校验与 PUT 相同（422）。
       x-roles: [ops, admin]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRuleSave' } } } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [rule], properties: { rule: { $ref: '#/components/schemas/PricingRule' } } } } }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRepricePreview' } } } }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRulePreview' } } } }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/Unprocessable' }
-  /rules/pricing/apply:
-    post:
-      tags: [rules]
-      operationId: applyPricingReprice
-      x-client-unused: true
-      summary: 【0.3.2 新增】确认保存计价规则，并在同一事务里重算未租账号
-      description: |
-        必须 `confirm: true`，并带上预览返回的 `baseVersion` 与 `fingerprint`。缺确认 → 422 VALIDATION_FAILED（fields 含 confirm）。
-        当前规则版本或库存（账号报价 / 状态 / 订单）或提议的规则正文与预览不一致 → 409 STALE_PREVIEW，不写入。
-        成功时在同一个数据库事务里：规则版本 +1 并写入版本历史、重写受影响账号的完整报价并盖上新 ruleVersion、写一条操作日志（含 v旧 → v新、重算账号数、租金变化数）。
-        租赁中、待结算、以及挂着 active / settling 订单的账号报价不变，进行中的订单仍使用下单时的报价快照。
-        `PUT /rules/pricing` 不走这条路径。
-      x-roles: [ops, admin]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRepriceApply' } } } }
-      responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRepriceResult' } } } }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
   /rules/valuation:
     get:
@@ -891,7 +878,7 @@ components:
     Unauthorized: { description: 未登录 / 令牌失效 / 用户被停用, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
     Forbidden: { description: 角色无权限, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
     NotFound: { description: 不存在或对当前用户不可见, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-    Conflict: { description: 状态冲突（非法流转、重复、黑名单、版本冲突 VERSION_CONFLICT、预览过期 STALE_PREVIEW）, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Conflict: { description: 状态冲突（非法流转、重复、黑名单、版本冲突）, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
     Unprocessable: { description: 校验失败（fields 给出字段级错误）, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
     TooLarge: { description: 请求体 / 文件过大, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
     Unsupported: { description: 不支持的文件类型, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
@@ -1540,46 +1527,72 @@ components:
         dealReferences: { type: array, items: { $ref: '#/components/schemas/DealReference' } }
     PricingRuleSave:
       type: object
-      required: [rule]
-      properties: { rule: { $ref: '#/components/schemas/PricingRule' }, summary: { type: string, maxLength: 200 } }
-    PricingRepriceRow:
-      type: object
-      description: 【0.3.2 新增】一条将被重算的未租账号。价格是折后纯币租金（整数元）。
-      required: [id, accountNo, oldPrice, newPrice, delta]
-      properties:
-        id: { type: string }
-        accountNo: { type: string, description: 账号编号（业务标识） }
-        oldPrice: { $ref: '#/components/schemas/Money' }
-        newPrice: { $ref: '#/components/schemas/Money' }
-        delta: { type: integer, description: newPrice - oldPrice，可为负 }
-    PricingRepricePreview:
-      type: object
-      description: 【0.3.2 新增】未租账号重算预览。不分页。
-      required: [baseVersion, fingerprint, count, accounts]
-      properties:
-        baseVersion: { type: integer, description: 预览所基于的当前规则版本 }
-        fingerprint: { type: string, description: 当前版本 + 提议规则 + 库存的 SHA-256 hex。确认保存时原样带回 }
-        count: { type: integer, minimum: 0 }
-        accounts: { type: array, items: { $ref: '#/components/schemas/PricingRepriceRow' } }
-    PricingRepriceApply:
-      type: object
-      description: 【0.3.2 新增】确认保存并重算。confirm 必须为 true。
-      required: [rule, confirm, baseVersion, fingerprint]
+      required: [rule, baseVersion, previewToken]
       properties:
         rule: { $ref: '#/components/schemas/PricingRule' }
         summary: { type: string, maxLength: 200 }
-        confirm: { type: boolean }
-        baseVersion: { type: integer }
-        fingerprint: { type: string }
-    PricingRepriceResult:
+        baseVersion: { type: integer, description: 预览返回的 baseVersion（预览时的当前版本） }
+        previewToken: { type: string, maxLength: 256, description: 预览返回的不透明令牌 }
+    PricingRuleSaveResult:
       type: object
-      description: 【0.3.2 新增】
-      required: [rule, fromVersion, toVersion, repriced]
+      required: [rule, repriced]
       properties:
         rule: { $ref: '#/components/schemas/PricingRule' }
-        fromVersion: { type: integer }
-        toVersion: { type: integer }
-        repriced: { type: integer, minimum: 0, description: 写入新报价的未租账号数（含租金未变的） }
+        repriced: { $ref: '#/components/schemas/RepriceSummary' }
+    RepricePrice:
+      type: object
+      description: 一个租期的报价明细，取自账号报价快照（PricingResult）的同名字段
+      required: [coinRent, renterRent, extraFee, serviceFee, ownerSettlement, deposit, totalAmount, rentalDays, discountPercent]
+      properties:
+        coinRent: { $ref: '#/components/schemas/Money' }
+        renterRent: { allOf: [{ $ref: '#/components/schemas/Money' }], description: '租客应付 = 折后租金 + 附加服务费（不含押金）；delta 以它为准' }
+        extraFee: { $ref: '#/components/schemas/Money' }
+        serviceFee: { $ref: '#/components/schemas/Money' }
+        ownerSettlement: { $ref: '#/components/schemas/Money' }
+        deposit: { $ref: '#/components/schemas/Money' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        rentalDays: { type: integer }
+        discountPercent: { type: number }
+    RepriceItem:
+      type: object
+      required: [accountId, accountNo, status, oldRuleVersion, oldPrice, newPrice, delta, changed]
+      properties:
+        accountId: { type: string }
+        accountNo: { type: string }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        oldRuleVersion: { type: integer }
+        oldPrice: { $ref: '#/components/schemas/RepricePrice' }
+        newPrice: { $ref: '#/components/schemas/RepricePrice' }
+        delta: { type: integer, description: newPrice.renterRent − oldPrice.renterRent（可为负） }
+        changed: { type: boolean, description: RepricePrice 任一字段有变化 }
+    RepriceSkip:
+      type: object
+      required: [accountId, accountNo, status, reason, ruleVersion]
+      properties:
+        accountId: { type: string }
+        accountNo: { type: string }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        reason: { type: string, enum: [RENTED, SETTLING, PRICING_ERROR] }
+        ruleVersion: { type: integer, description: 保留不动的报价版本 }
+        message: { type: string, description: PRICING_ERROR 时的原因 }
+    RepriceSummary:
+      type: object
+      required: [affectedCount, changedCount, skippedCount, totalDelta]
+      properties:
+        affectedCount: { type: integer }
+        changedCount: { type: integer }
+        skippedCount: { type: integer }
+        totalDelta: { type: integer, description: affected 的 delta 之和（元 / 租期） }
+    PricingRulePreview:
+      type: object
+      required: [baseVersion, nextVersion, previewToken, affected, skipped, summary]
+      properties:
+        baseVersion: { type: integer }
+        nextVersion: { type: integer }
+        previewToken: { type: string }
+        affected: { type: array, items: { $ref: '#/components/schemas/RepriceItem' } }
+        skipped: { type: array, items: { $ref: '#/components/schemas/RepriceSkip' } }
+        summary: { $ref: '#/components/schemas/RepriceSummary' }
     ValuationRuleSave:
       type: object
       required: [rule]

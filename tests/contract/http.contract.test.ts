@@ -347,7 +347,11 @@ describe('HttpApi ↔ 契约：每个方法的路径、方法、请求与响应'
 
     // 规则（版本化；按原样保存，不改远端的计价 / 估值参数）
     const pr = await api.getPricingRule()
-    expect((await api.savePricingRule(pr, '契约测试')).version).toBe(pr.version + 1)
+    const prv = await api.previewPricingRule(pr).catch((e) => e)
+    if (prv instanceof ApiError && prv.errorCode === 'NOT_SUPPORTED') notes.push('POST /rules/pricing/preview 未实现：按旧方式保存规则（不重算库存）')
+    const saved = await api.savePricingRule(pr, '契约测试', prv instanceof ApiError ? undefined : { baseVersion: prv.baseVersion, previewToken: prv.previewToken })
+    expect(saved.rule.version).toBe(pr.version + 1)
+    if (saved.repriced === null) notes.push('PUT /rules/pricing 仍回 PricingRule，未回 PricingRuleSaveResult（不重算库存）')
     const vr = await api.getValuationRule()
     expect((await api.saveValuationRule(vr, '契约测试')).version).toBe(vr.version + 1)
     const hist = await api.ruleHistory()
@@ -476,6 +480,48 @@ describe('HttpApi ↔ 契约：每个方法的路径、方法、请求与响应'
     if (!m) return skipWith(ctx, skipReason)
     const lobby = await m.api.listListedAccounts()
     expect(lobby.every((a) => a.quote && a.quote.ownerSettlement === undefined && a.quote.serviceFee === undefined)).toBe(true)
+  })
+
+  it('改规则重算库存：预览不落库；租赁中跳过；确认后原子重算并升报价版本；旧预览 / 旧版本 409 RULE_CONFLICT', async (ctx) => {
+    const { api } = await asAdmin()
+    const orig = await api.getPricingRule()
+    const probe = await api.previewPricingRule(orig).catch((e) => e)
+    if (probe instanceof ApiError && probe.errorCode === 'NOT_SUPPORTED') return skipWith(ctx, 'POST /rules/pricing/preview 未实现（v0.4 新增）；规则页退回“仍然保存（不重算）”')
+    const [a, b] = await createAccounts(api, 2)
+    const o = await api.createOrder(orderInput(b.id, uniq('wx_ct_rp_').toLowerCase()))
+    const cand = { ...orig, extraFee: { mode: 'fixed' as const, value: (orig.extraFee.mode === 'fixed' ? orig.extraFee.value : 0) + 7 } }
+    const pv = await api.previewPricingRule(cand)
+    expect(pv.baseVersion).toBe(orig.version)
+    expect(pv.nextVersion).toBe(orig.version + 1)
+    expect((await api.getPricingRule()).version).toBe(orig.version) // 不落库
+    const ia = pv.affected.find((x) => x.accountId === a.id)!
+    expect(ia).toMatchObject({ accountNo: a.accountNo, status: 'listed', oldRuleVersion: a.quote.ruleVersion, changed: true })
+    expect(ia.oldPrice.renterRent).toBe(a.quote.renterRent)
+    expect(ia.newPrice.extraFee).toBe(cand.extraFee.value)
+    expect(ia.delta).toBe(ia.newPrice.renterRent - ia.oldPrice.renterRent)
+    expect(pv.skipped.find((x) => x.accountId === b.id)).toMatchObject({ reason: 'RENTED', ruleVersion: b.quote.ruleVersion })
+    expect(pv.summary.affectedCount).toBe(pv.affected.length)
+    expect(pv.summary.skippedCount).toBe(pv.skipped.length)
+    // 缺预览 → 422；规则内容与预览不一致 → 409 PREVIEW_STALE
+    // 故意发不合契约的请求体，绕过客户端校验直接发
+    const raw = await fetch(`${base}/rules/pricing`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(api as any).tokens.get()}` }, body: JSON.stringify({ rule: cand, summary: '契约测试' }) })
+    expect(raw.status).toBe(422)
+    expect(await api.savePricingRule({ ...cand, defaultDeposit: cand.defaultDeposit + 1 }, '契约测试', pv).catch((e) => e)).toMatchObject({ code: 409, errorCode: 'RULE_CONFLICT', details: { reason: 'PREVIEW_STALE' } })
+    const res = await api.savePricingRule(cand, '契约测试：改价重算', { baseVersion: pv.baseVersion, previewToken: pv.previewToken })
+    expect(res.rule.version).toBe(orig.version + 1)
+    expect(res.repriced).toMatchObject({ affectedCount: pv.summary.affectedCount, skippedCount: pv.summary.skippedCount })
+    const accs = await api.listAccounts()
+    expect(accs.find((x) => x.id === a.id)!.quote).toMatchObject({ ruleVersion: res.rule.version, renterRent: ia.newPrice.renterRent })
+    expect(accs.find((x) => x.id === b.id)!.quote.ruleVersion).toBe(b.quote.ruleVersion)
+    expect(await api.getOrder(o.id)).toMatchObject({ coinRent: o.coinRent, ownerPayable: o.ownerPayable, totalAmount: o.totalAmount })
+    const log = (await api.auditLogs()).find((l) => l.action === '计价规则')
+    expect(log?.summary).toContain(`v${res.rule.version}`)
+    // 拿旧预览再存 → 版本已变
+    expect(await api.savePricingRule(cand, '契约测试', pv).catch((e) => e)).toMatchObject({ code: 409, errorCode: 'RULE_CONFLICT', details: { reason: 'VERSION_CHANGED' } })
+    // 还原规则内容（远端不留下改动的参数；版本号照常 +1）
+    const back = await api.previewPricingRule({ ...orig, version: res.rule.version })
+    await api.savePricingRule({ ...orig, version: res.rule.version }, '契约测试：还原', back)
+    await api.cancelOrder(o.id, '契约测试')
   })
 
   describe('提议接口（x-status: proposed）：后端未实现时跳过并说明', () => {

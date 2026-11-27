@@ -55,14 +55,14 @@ app.use((req, res, next) => {
   next()
 })
 
-function sendError(res: Response, status: number, code: string, message: string, fields?: FieldError[]) {
+function sendError(res: Response, status: number, code: string, message: string, fields?: FieldError[], details?: Record<string, unknown>) {
   const requestIdHeader = String(res.getHeader('X-Request-Id') ?? '')
-  res.status(status).json({ error: { code, message, ...(fields?.length ? { fields } : {}), ...(requestIdHeader ? { requestId: requestIdHeader } : {}) } })
+  res.status(status).json({ error: { code, message, ...(fields?.length ? { fields } : {}), ...(details ? { details } : {}), ...(requestIdHeader ? { requestId: requestIdHeader } : {}) } })
 }
 function mapError(e: ApiError, login: boolean) {
   if (login && e.code === 401) return { status: 401, code: 'INVALID_CREDENTIALS', message: e.message || '账号或密码错误' }
   if (login && e.code === 403) return { status: 403, code: 'USER_DISABLED', message: e.message || '该账号已停用' }
-  if (e.errorCode) return { status: e.code, code: e.errorCode, message: e.message, fields: e.fields }
+  if (e.errorCode) return { status: e.code, code: e.errorCode, message: e.message, fields: e.fields, details: e.details }
   if (e.code === 401) return { status: 401, code: 'UNAUTHENTICATED', message: e.message || '登录已失效，请重新登录' }
   if (e.code === 403) return { status: 403, code: 'FORBIDDEN', message: e.message }
   if (e.code === 404) return { status: 404, code: 'NOT_FOUND', message: e.message }
@@ -654,23 +654,17 @@ app.get('/api/rules/pricing', wrap(async (req, res) => {
 }))
 app.put('/api/rules/pricing', wrap(async (req, res) => {
   const u = requireRoles(req, ['ops', 'admin'])
-  const rule = (req.body?.rule ?? req.body) as PricingRule
-  res.json(await writeDb((db) => engine.savePricingRule(db, u, rule, typeof req.body?.summary === 'string' ? req.body.summary : '')))
+  const rule = req.body?.rule as PricingRule
+  const baseVersion = req.body?.baseVersion
+  const previewToken = req.body?.previewToken
+  res.json(await writeDb((db) => engine.savePricingRule(db, u, rule, typeof req.body?.summary === 'string' ? req.body.summary : '', {
+    baseVersion: typeof baseVersion === 'number' ? baseVersion : undefined,
+    previewToken: typeof previewToken === 'string' ? previewToken : undefined,
+  })))
 }))
 app.post('/api/rules/pricing/preview', wrap(async (req, res) => {
   const u = requireRoles(req, ['ops', 'admin'])
-  const rule = (req.body?.rule ?? req.body) as PricingRule
-  res.json(await readDb((db) => engine.previewPricingReprice(db, u, rule)))
-}))
-app.post('/api/rules/pricing/apply', wrap(async (req, res) => {
-  const u = requireRoles(req, ['ops', 'admin'])
-  res.json(await writeDb((db) => engine.applyPricingReprice(db, u, {
-    rule: req.body?.rule as PricingRule,
-    summary: typeof req.body?.summary === 'string' ? req.body.summary : '',
-    confirm: req.body?.confirm === true,
-    baseVersion: typeof req.body?.baseVersion === 'number' ? req.body.baseVersion : undefined,
-    fingerprint: typeof req.body?.fingerprint === 'string' ? req.body.fingerprint : '',
-  })))
+  res.json(await readDb((db) => engine.previewPricingRule(db, u, req.body?.rule as PricingRule)))
 }))
 app.get('/api/rules/valuation', wrap(async (req, res) => {
   const u = requireRoles(req, ['ops', 'admin'])
@@ -771,7 +765,7 @@ app.use('/api', (req, res) => {
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {
     const mapped = mapError(err, req.path === '/api/auth/login')
-    return sendError(res, mapped.status, mapped.code, mapped.message, mapped.fields)
+    return sendError(res, mapped.status, mapped.code, mapped.message, mapped.fields, mapped.details)
   }
   if (err instanceof MulterError) {
     const tooBig = err.code === 'LIMIT_FILE_SIZE'

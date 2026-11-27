@@ -7,6 +7,7 @@ export class ApiError extends Error {
     public persist = false,
     public errorCode?: string,
     public fields?: FieldError[],
+    public details?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'

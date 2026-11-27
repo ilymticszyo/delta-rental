@@ -1,6 +1,6 @@
 # API 契约（前端 ↔ 后端）
 
-> 机器可读版本：[`docs/openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3，**0.3.2-draft**，65 个操作，其中 4 个为 `x-status: proposed` 提议操作，见 10.1；另有 2 个 **0.3.2 新增**且标了 `x-client-unused` 的未租重算接口，见第 12 节第 4 条）。两者冲突时以 openapi.yaml 为准，并同步修正本文。
+> 机器可读版本：[`docs/openapi.yaml`](./openapi.yaml)（OpenAPI 3.0.3，**0.4.0-draft**，64 个操作，其中 4 个为 `x-status: proposed` 提议操作，见 10.1）。两者冲突时以 openapi.yaml 为准，并同步修正本文。
 > 前端实现：`src/api/http.ts`（HttpApi）；接口定义：`src/api/types.ts`（`Api`）；共享领域类型：`src/domain/types.ts`、`src/config/rules.ts`。
 > 契约测试：`tests/contract/`（`npm run test:contract`）——设 `CONTRACT_BASE_URL` 即可把同一套用例指向真实后端做回归（见第 11 节）。
 
@@ -65,7 +65,7 @@
 | 回收后台 `GET /recycles`、`/transitions`、`/to-inventory` | – | – | ✓ | ✓ | ✓ |
 | 档案 `/renters…`、`/owners` | – | – | ✓ | ✓ | ✓ |
 | `GET /rules/pricing`（含服务费率） | – | – | ✓ | ✓ | ✓ |
-| `PUT /rules/*`、`GET /rules/valuation`、`/rules/versions`、`/rules/*/trial` | – | – | – | ✓ | ✓ |
+| `PUT /rules/*`、`POST /rules/pricing/preview`、`GET /rules/valuation`、`/rules/versions`、`/rules/*/trial` | – | – | – | ✓ | ✓ |
 | `/reports`、`/dashboard` | – | – | ✓ | ✓ | ✓ |
 | `/staff…`、`/audit-logs` | – | – | – | – | ✓ |
 | `/demo/reset`（仅演示环境） | – | – | – | – | ✓ |
@@ -115,8 +115,8 @@ X-Request-Id: 7f3a9c
 | 409 | `RENTER_BLACKLISTED` | 黑名单联系方式登记订单（同时写操作日志「拦截黑名单」） |
 | 409 | `BALANCE_NOT_SETTLED` | 结单时押金或号主应付未清零且未填说明 |
 | 409 | `DUPLICATE` | 编号 / 联系方式等唯一键冲突 |
-| 409 | `VERSION_CONFLICT` | 保存规则或预览重算时 `rule.version` 不是当前版本（乐观锁） |
-| 409 | `STALE_PREVIEW` | 【0.3.2】确认重算时，规则版本、规则正文或库存与预览的 `baseVersion` / `fingerprint` 不一致 |
+| 409 | `RULE_CONFLICT` | 保存计价规则时 `baseVersion` 不是当前版本（`details.reason=VERSION_CHANGED`），或预览之后规则 / 库存有变化（`PREVIEW_STALE`）。见 6.1 |
+| 409 | `VERSION_CONFLICT` | 保存估值依据时 `rule.version` 不是当前版本（乐观锁）；计价规则自 v0.4 起改用 `RULE_CONFLICT`，前端两者都认 |
 | 409 | `LAST_ADMIN` | 停用自己或最后一个管理员 |
 | 409 | `DUPLICATE` | 同一 `Idempotency-Key` 配不同请求体（幂等冲突，与唯一键冲突同码） |
 | 409 | `OWNER_ALREADY_BOUND` | （提议，随 `POST /staff`）号主档案已绑定其他用户 |
@@ -168,7 +168,29 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 | 权限、字段裁剪、状态流转、编号生成 | **服务端** | |
 | 前端 | 仅预览 | `src/domain/*` 是参考实现：`pricing.ts`、`valuation.ts`、`importAccounts.ts`、`reports.ts`；`tests/pricing.test.ts`、`tests/valuation.test.ts`、`tests/import.test.ts` 里的 PRD 例题与边界用例是后端必须同样通过的“金标准” |
 
-规则保存（`PUT /rules/pricing|valuation`）：请求 `{rule, summary}`，`rule.version` 必须等于当前版本（乐观锁，否则 409 `VERSION_CONFLICT`），成功后版本 +1 并记 `RuleVersionMeta`（保存人、时间、说明）。**`PUT /rules/pricing` 不改已有账号报价**（兼容已有客户端）。【0.3.2】要让未租库存改用新规则，先 `POST /rules/pricing/preview`，确认后再 `POST /rules/pricing/apply`（第 12 节第 4 条）。登记订单的租金、号主应付、熟客免押都按**账号报价的 `ruleVersion` 那一版规则**算；租赁中和有进行中订单的账号不会被重算，所以订单仍锁在下单时的报价。订单与 `/orders/preview` 回 `ruleVersion`，前端在有值时展示“计价规则 vN”，库存列表展示报价版本并标出落后于当前规则的账号。`/rules/*/trial` 用未保存的规则试算，不落库，必须与正式计算走同一实现。
+估值依据保存（`PUT /rules/valuation`）：请求 `{rule, summary}`，`rule.version` 必须等于当前版本（乐观锁，否则 409 `VERSION_CONFLICT`），成功后版本 +1 并记 `RuleVersionMeta`（保存人、时间、说明）。计价规则保存见 6.1（v0.4 起先预览、再保存并重算未出租库存）。登记订单的租金、号主应付、熟客免押都按**账号报价的 `ruleVersion` 那一版规则**算（租赁中 / 待结算的账号改规则时不重算，归还后仍是旧版本报价，直到下次改规则或编辑）（mock 已改为保存每版规则快照）；建议订单与 `/orders/preview` 回 `ruleVersion`（提议字段），前端在有值时展示“计价规则 vN”，库存列表展示报价版本并标出落后于当前规则的账号。`/rules/*/trial` 用未保存的规则试算，不落库，必须与正式计算走同一实现。
+
+### 6.1 改计价规则 → 重算库存（v0.4，产品已确认）
+
+> **取代第 12 节第 4 条的旧条文**（“改规则不自动重算”）。第 12 节第 4 条已改写成指向本节。
+
+改计价规则时，**未出租的库存账号自动按新规则重算报价**；租赁中 / 待结算的账号和所有已登记订单不变。参考实现 `src/domain/reprice.ts`（`planReprice`）。
+
+1. `POST /rules/pricing/preview {rule}`（ops / admin，**不落库**）→ `PricingRulePreview { baseVersion, nextVersion, previewToken, affected[], skipped[], summary }`。
+   - `affected`：未删除且 `status ∈ {draft, listed, off, held}` 的账号（寄租与自收都算），按候选规则、非熟客口径重算（与保存账号同一实现）。每项 `{accountId, accountNo, status, oldRuleVersion, oldPrice, newPrice, delta, changed}`。价格没变的也列出（`changed=false`），保存时同样升到新版本。
+   - `skipped`：`rented → RENTED`、`settling → SETTLING`；新规则下算不出价（周期 / 渠道被删、自定义折扣超出新范围）→ `PRICING_ERROR` + `message`。这些账号保留旧报价。每项 `{accountId, accountNo, status, reason, ruleVersion, message?}`。
+   - “价格” = `RepricePrice`，取账号报价快照（`PricingResult`）里一个租期的明细：`coinRent` 折后租金、`renterRent` 租客应付（= 折后租金 + 附加服务费，不含押金）、`extraFee`、`serviceFee`、`ownerSettlement` 号主可得、`deposit`、`totalAmount`、`rentalDays`、`discountPercent`。`delta = newPrice.renterRent − oldPrice.renterRent`；`summary = {affectedCount, changedCount, skippedCount, totalDelta}`。
+   - `previewToken` 不透明，客户端只原样带回。后端实现为 HMAC-SHA256（与上传签名同一密钥）。输入是 baseVersion、去掉 version 的规范化候选规则、每个未删除账号的 id / status / updatedAt / quote.ruleVersion。令牌形如 `pv1.{baseVersion}.{hex}`。保存时重算比对，服务端不存。可以加有效期。
+2. 前端弹窗列出受影响账号的新旧价（默认只看有变动的）、合计差额、跳过的账号及原因，用户确认后才保存。
+3. `PUT /rules/pricing {rule, summary, baseVersion, previewToken}`。服务端在**一个事务**里依次执行：
+   - `baseVersion ≠ 当前` → 409 `RULE_CONFLICT`（`details.reason=VERSION_CHANGED`，`details.currentVersion`）；
+   - 重算令牌不一致 → 409 `RULE_CONFLICT`（`PREVIEW_STALE`）；
+   - 缺 `baseVersion` / `previewToken` → 422；
+   - 全部通过：版本 +1，`affected` 的报价改为新快照（`quote.ruleVersion` = 新版本，刷新 `updatedAt`），写操作日志「计价规则」（新版本、说明、重算 / 变动 / 合计差额、按原因的跳过数）；
+   - 返回 `PricingRuleSaveResult { rule, repriced: RepriceSummary }`。
+
+   `rule.version` 被忽略。
+4. 前端处理 409：`PREVIEW_STALE` 时自动重新预览，让用户再核对一次；`VERSION_CHANGED` 时提示“规则已被他人修改”，请用户载入最新规则后重改，不覆盖别人的改动。预览接口 404 / 501（旧后端）时提示“后端暂未支持改价预览，保存后不会重算现有库存”，用户可选择仍然保存。
 
 ## 7. 上传（资产截图）
 
@@ -219,8 +241,8 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 | GET | /payables | `listPayables` | `ownerId`；`orderId`（提议参数，未支持时前端本地按订单过滤） |
 | GET · POST | /renters | `renterProfiles` · `saveRenter`(upsert) | |
 | GET | /renters/lookup?contact= · /owners | `lookupRenter` · `ownerProfiles` | |
-| GET · PUT | /rules/pricing · /rules/valuation | `get/savePricingRule` · `get/saveValuationRule` | PUT 计价规则不重算库存 |
-| POST | /rules/pricing/preview · /rules/pricing/apply | （0.3.2 新增，`x-client-unused`） | 预览并确认重算未租账号，见第 12 节第 4 条 |
+| GET · PUT | /rules/pricing · /rules/valuation | `get/savePricingRule` · `get/saveValuationRule` | 计价规则 PUT 须带预览的 `baseVersion` + `previewToken`，回 `PricingRuleSaveResult` |
+| POST | /rules/pricing/preview | `previewPricingRule` | 改规则预览（不落库），见 6.1 |
 | GET | /rules/versions | `ruleHistory` | |
 | POST | /rules/pricing/trial · /rules/valuation/trial | `trialPricing` · `trialValuation` | |
 | GET | /reports?from&to&dimension · /dashboard | `report` · `dashboard` | |
@@ -236,8 +258,8 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 |---|---|---|---|---|
 | GET | /dicts | `getDicts` | 所有登录角色都要字典（大区、段位、皮肤…）；第 12 节第 6 条说走 `/accounts/import/context`，但它只对 ops / admin 开放，客服、号主、会员拿不到 | ops / admin 退回 `import/context`，其他角色用前端内置字典 |
 | GET | /uploads/{id} | `refreshAttachment` | 1 小时签名过期后只重签一张图，不必重拉整个资源 | 重新拉取所在资源 |
-| POST | /staff | `createUser` | 管理员新建用户。`role=owner` 必须带尚未绑定的 `ownerId`（1:1）。密码 8–128 位 | 员工页“新建用户” |
-| POST | /staff/{username}/password | （无界面入口） | 仅管理员重置密码并吊销该用户全部令牌。不提供自助改密 | 无 |
+| POST | /staff | `createUser` | 第 12 节第 5 条：管理员在员工管理里新建号主登录并选号主档案（1:1）。**后端已就是否新增该接口询问用户，待确认** | 员工页“新建用户”表单显示“后端暂未支持新建用户”，创建按钮禁用 |
+| POST | /staff/{username}/password | （无界面入口） | 重置密码并吊销旧令牌 | 无 |
 | 字段 | `RentalOrder.ruleVersion`、`OrderPreview.ruleVersion` | | 订单记录按哪版规则计价 | 不显示“计价规则”一行 |
 | 字段 | `Attachment.expiresAt` | | 到期前主动续签 | 图片加载失败时再续 |
 | 参数 | `GET /payables?orderId=` | `listPayables` | 订单详情只拉本单台账 | 前端本地过滤 |
@@ -255,10 +277,7 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 1. **鉴权**：不透明 Bearer 令牌（≥128 位随机，服务端只存 SHA-256）。12 小时滑动续期，绝对最长 7 天。退出、停用用户立即吊销该用户全部令牌。不用 JWT，也不下发 Cookie。无效或过期 → 401 `UNAUTHENTICATED`。登录失败统一 `401 INVALID_CREDENTIALS`；停用账号登录 `403 USER_DISABLED`。
 2. **截图**：存在本机磁盘（compose 卷 `uploads`）。`url` 为 HMAC 签名地址 `/api/uploads/{id}/content?exp=&sig=`，有效期 1 小时，列表接口每次重签。`<img>` 不带 Authorization。号主只能把**自己上传且未绑定**的 id，或该账号已有的 id，绑到自己的号。
 3. **分页**：首版就做服务端分页。`page` / `pageSize`（默认 50，最大 200，超出按 200）。前端可以继续用 `pageSize=200` 翻页拉全量。
-4. **【0.3.2】确认后重算未租库存。** `PUT /rules/pricing` 仍只保存新版本、不改已有报价（已有客户端保持原样）。产品流程是两步，都要 `rulesEdit`（ops、admin）：
-   - `POST /rules/pricing/preview`，请求 `{ rule, summary? }`（`rule.version` 必须是当前版本，否则 409 `VERSION_CONFLICT`）。只读。响应 `{ baseVersion, fingerprint, count, accounts: [{ id, accountNo, oldPrice, newPrice, delta }] }`。`oldPrice` / `newPrice` 是折后纯币租金 `quote.coinRent`（整数元），`delta = newPrice - oldPrice`。`accountNo` 是业务标识。一次返回全部，不分页。范围：未删除，且状态不是 `rented` / `settling`，也没有 `active` / `settling` 订单。`count` 含租金不变的账号。
-   - `POST /rules/pricing/apply`，请求 `{ rule, summary?, confirm: true, baseVersion, fingerprint }`。`confirm` 不是 `true` → 422 `VALIDATION_FAILED`。`baseVersion` 或 `fingerprint` 对不上（规则版本、规则正文或库存变了）→ 409 `STALE_PREVIEW`，不写入。成功时**同一个数据库事务**：规则版本 +1、重写这些账号的完整报价并盖上新 `ruleVersion`、写一条操作日志（`v旧 → v新`、重算数量、租金变化数量）。响应 `{ rule, fromVersion, toVersion, repriced }`。
-   - 租赁中、待结算、挂着进行中订单的账号不改价。订单金额仍是下单时的报价快照，按账号报价上的 `ruleVersion` 取那一版规则。
+4. **改计价规则先预览，确认后重算未出租库存（v0.4，见 6.1）。** `POST /rules/pricing/preview` 列出受影响与跳过的账号。`PUT /rules/pricing` 必须带回 `baseVersion` 与 `previewToken`，并在同一个事务里保存新版本、重写未出租账号的报价。租赁中 / 待结算的账号和已登记订单不动。缺预览 → 422；版本或库存变了 → 409 `RULE_CONFLICT`。
 5. **号主登录**：用户行带 `ownerId`，与号主档案 1:1（种子里 owner1↔ow1、owner2↔ow2）。管理员用 `POST /staff` 新建登录并绑定档案，用 `POST /staff/{username}/password` 重置密码（立即吊销旧令牌）。这两个接口只对管理员开放，没有自助改密。密码 8–128 位，bcrypt 存储。
 6. **字典与客服排班**：只读。字典走 `GET /accounts/import/context` 与 `GET /pricing/options`，排班走 `GET /cs-agents`。管理接口以后再加。
 7. **幂等**：`POST /orders`、`POST /accounts/import`、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`。同一用户、同一路径、同一请求体在 24 小时内重放当时的响应；同一把钥匙配不同请求体 → 409 `DUPLICATE`。

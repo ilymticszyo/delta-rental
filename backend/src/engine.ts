@@ -9,7 +9,7 @@ import { calcValuation, validateValuationInput } from './domain/valuation'
 import { lobbyAccountFor, pricingFor, toOwnerView } from './domain/visibility'
 import type {
   Account, AccountAdminView, AccountInput, AccountStatus, Attachment, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep,
-  OwnerPayableEntry, PricingInput, RecycleRequest, RecycleStatus, RentalOrder, RenterTag, Role, User, ValuationInput,
+  OwnerPayableEntry, PricingInput, PricingResult, RecycleRequest, RecycleStatus, RentalOrder, RenterTag, Role, User, ValuationInput,
 } from './domain/types'
 import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL } from './domain/types'
 import { toPricingInput, type Db, type DbUser } from './domain/seedData'
@@ -34,8 +34,10 @@ export function payableBalance(entries: OwnerPayableEntry[]): number {
 
 const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)))
 const stableJson = (v: unknown): string => Array.isArray(v) ? `[${v.map(stableJson).join(',')}]`
-  : v && typeof v === 'object' ? `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`).join(',')}}`
-  : JSON.stringify(v) ?? 'null'
+  : v && typeof v === 'object' ? `{${Object.keys(v as object).sort().filter((k) => (v as Record<string, unknown>)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`).join(',')}}`
+  : JSON.stringify(v ?? null)
+const PRICE_KEYS = ['coinRent', 'renterRent', 'extraFee', 'serviceFee', 'ownerSettlement', 'deposit', 'totalAmount', 'rentalDays', 'discountPercent'] as const
+const priceOf = (q: PricingResult) => Object.fromEntries(PRICE_KEYS.map((k) => [k, Number(q[k] ?? 0)])) as Record<(typeof PRICE_KEYS)[number], number>
 const norm = (c: string) => c.trim().toLowerCase()
 const addDays = (iso: string, d: number) => new Date(new Date(iso).getTime() + d * DAY).toISOString()
 
@@ -675,91 +677,94 @@ export class Engine {
     this.actor(user)
     return clone(db.pricingRule)
   }
-  savePricingRule(db: Db, user: User | null, rule: PricingRule, summary = '') {
-    const u = this.need(user, 'rulesEdit')
-    if (rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
-    db.pricingRule = { ...clone(rule), version: db.pricingRule.version + 1 }
-    db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: this.nowIso(), savedBy: u.username, summary: summary || '修改计价规则', rule: clone(db.pricingRule) })
-    this.audit(db, u, '计价规则', `保存为 v${db.pricingRule.version} ${summary}`)
-    return db.pricingRule
-  }
-  /** 未出租、且没有进行中订单的库存账号。租赁中 / 待结算，或挂着 active / settling 订单的，保留原报价。 */
-  private repriceTargets(db: Db) {
-    const busy = new Set(db.orders.filter((o) => o.status === 'active' || o.status === 'settling').map((o) => o.accountId))
-    return db.accounts
-      .filter((a) => !a.deleted && a.status !== 'rented' && a.status !== 'settling' && !busy.has(a.id))
-      .sort((a, b) => a.accountNo.localeCompare(b.accountNo))
-  }
-  private repriceFingerprint(db: Db, rule: PricingRule) {
-    const body = [
-      String(db.pricingRule.version),
-      stableJson(rule),
-      ...db.accounts.filter((a) => !a.deleted).sort((a, b) => a.id.localeCompare(b.id)).map((a) =>
-        `${a.id}|${a.status}|${a.updatedAt}|${a.quote.ruleVersion}|${a.quote.coinRent}|${a.quote.totalAmount}`),
-      ...db.orders.map((o) => `${o.id}|${o.accountId}|${o.status}`).sort(),
-    ].join('\n')
-    return crypto.createHash('sha256').update(body).digest('hex')
-  }
-  private planReprice(db: Db, nextRule: PricingRule) {
-    try {
-      return this.repriceTargets(db).map((a) => {
-        const quote = pricing(toPricingInput(a), nextRule)
-        return { account: a, id: a.id, accountNo: a.accountNo, oldPrice: a.quote.coinRent, newPrice: quote.coinRent, delta: quote.coinRent - a.quote.coinRent, quote }
-      })
-    } catch (e) {
-      if (e instanceof ApiError && !e.errorCode) throw new ApiError(e.message, 422, false, 'VALIDATION_FAILED')
-      throw e
-    }
-  }
-  /** 只读预览。price = 折后纯币租金 quote.coinRent（整数元）。 */
-  previewPricingReprice(db: Db, user: User | null, rule: PricingRule) {
+  /** 只读预览。与 src/domain/reprice.ts 同一范围：draft/listed/off/held 重算，rented/settling 与算不出价的跳过。 */
+  previewPricingRule(db: Db, user: User | null, rule: PricingRule) {
     this.need(user, 'rulesEdit')
-    if (!rule || rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
-    const nextRule = { ...clone(rule), version: db.pricingRule.version + 1 }
-    const planned = this.planReprice(db, nextRule)
-    const accounts = planned.map(({ id, accountNo, oldPrice, newPrice, delta }) => ({ id, accountNo, oldPrice, newPrice, delta }))
-    return { baseVersion: db.pricingRule.version, fingerprint: this.repriceFingerprint(db, rule), count: accounts.length, accounts }
+    if (!rule) throw new ApiError('缺少规则', 422, false, 'VALIDATION_FAILED', [{ field: 'rule', message: '缺少规则' }])
+    return this.buildReprice(db, rule).preview
   }
   /**
-   * 确认后在一次调用里保存新规则并重算未租账号。校验失败时恢复调用前的内存状态，
-   * 与 writeDb 的数据库事务回滚一致。
+   * 确认后在一次调用里保存新规则并重算未出租账号。校验失败或写日志失败时恢复调用前的内存状态，
+   * 与 writeDb 的数据库事务回滚一致。rule.version 忽略，新版本由服务端定。
    */
-  applyPricingReprice(db: Db, user: User | null, input: { rule: PricingRule; summary?: string; confirm?: boolean; baseVersion?: number; fingerprint?: string }) {
+  savePricingRule(db: Db, user: User | null, rule: PricingRule, summary = '', confirm?: { baseVersion?: number; previewToken?: string }) {
     const u = this.need(user, 'rulesEdit')
-    if (!input.rule) throw new ApiError('缺少规则', 422, false, 'VALIDATION_FAILED', [{ field: 'rule', message: '缺少规则' }])
-    if (input.confirm !== true) throw new ApiError('需要确认后才会保存并重算', 422, false, 'VALIDATION_FAILED', [{ field: 'confirm', message: '请先预览并传 confirm=true' }])
-    if (input.baseVersion !== db.pricingRule.version || input.fingerprint !== this.repriceFingerprint(db, input.rule)) {
-      throw new ApiError('预览已过期，规则或库存已变化，请重新预览', 409, false, 'STALE_PREVIEW')
+    if (!rule) throw new ApiError('缺少规则', 422, false, 'VALIDATION_FAILED', [{ field: 'rule', message: '缺少规则' }])
+    if (!confirm || !Number.isInteger(confirm.baseVersion) || !confirm.previewToken) {
+      throw new ApiError('请先预览受影响的账号再保存（缺少 baseVersion / previewToken）', 422, false, 'VALIDATION_FAILED', [{ field: 'previewToken', message: '必填' }])
     }
-    if (input.rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
-    const fromVersion = db.pricingRule.version
-    const nextRule = { ...clone(input.rule), version: fromVersion + 1 }
-    const planned = this.planReprice(db, nextRule)
-    const targets = planned.map((row) => row.account)
+    const cur = db.pricingRule.version
+    if (confirm.baseVersion !== cur) {
+      throw new ApiError(`计价规则已被他人保存为 v${cur}，请重新预览`, 409, false, 'RULE_CONFLICT', undefined, { reason: 'VERSION_CHANGED', currentVersion: cur })
+    }
+    const planned = this.buildReprice(db, rule)
+    if (planned.preview.previewToken !== confirm.previewToken) {
+      throw new ApiError('预览之后库存或规则有变化，请重新预览', 409, false, 'RULE_CONFLICT', undefined, { reason: 'PREVIEW_STALE', currentVersion: cur })
+    }
     const backup = {
       pricingRule: db.pricingRule,
       pricingHistory: db.pricingHistory,
       audit: db.audit,
-      rows: targets.map((a) => ({ account: a, quote: a.quote, updatedAt: a.updatedAt })),
+      rows: planned.updates.map((row) => ({ account: row.account, quote: row.account.quote, updatedAt: row.account.updatedAt })),
     }
     try {
       const t = this.nowIso()
-      db.pricingRule = nextRule
-      db.pricingHistory = [{ version: nextRule.version, savedAt: t, savedBy: u.username, summary: input.summary || '修改计价规则并重算未租账号', rule: clone(nextRule) }, ...db.pricingHistory]
-      let changed = 0
-      for (const row of planned) {
-        if (row.quote.coinRent !== row.account.quote.coinRent) changed++
-        row.account.quote = row.quote
-        row.account.updatedAt = t
-      }
-      this.audit(db, u, '计价规则', `v${fromVersion} → v${nextRule.version}，重算未租账号 ${planned.length} 个（租金变化 ${changed} 个）${input.summary ? ' ' + input.summary : ''}`)
-      return { rule: db.pricingRule, fromVersion, toVersion: nextRule.version, repriced: planned.length }
+      for (const row of planned.updates) { row.account.quote = row.quote; row.account.updatedAt = t }
+      db.pricingRule = planned.candidate
+      db.pricingHistory = [{ version: planned.candidate.version, savedAt: t, savedBy: u.username, summary: summary || '修改计价规则', rule: clone(planned.candidate) }, ...db.pricingHistory]
+      const sm = planned.preview.summary
+      const by = (reason: string) => planned.preview.skipped.filter((x) => x.reason === reason).length
+      const sign = sm.totalDelta > 0 ? '+' : ''
+      this.audit(db, u, '计价规则', `保存为 v${planned.candidate.version} ${summary}；重算 ${sm.affectedCount} 个账号（价格变动 ${sm.changedCount}，租客应付合计 ${sign}${sm.totalDelta} 元/租期），跳过 ${sm.skippedCount}（租赁中 ${by('RENTED')}、待结算 ${by('SETTLING')}、无法计价 ${by('PRICING_ERROR')}）`.replace(/\s+；/, '；'))
+      return { rule: db.pricingRule, repriced: sm }
     } catch (e) {
       db.pricingRule = backup.pricingRule
       db.pricingHistory = backup.pricingHistory
       db.audit = backup.audit
       for (const row of backup.rows) { row.account.quote = row.quote; row.account.updatedAt = row.updatedAt }
       throw e
+    }
+  }
+  private previewToken(db: Db, rule: PricingRule) {
+    const { version: _version, ...rest } = rule
+    const acc = db.accounts.filter((a) => !a.deleted).map((a) => [a.id, a.status, a.updatedAt, a.quote?.ruleVersion ?? null])
+    const body = stableJson({ baseVersion: db.pricingRule.version, rule: rest, acc })
+    const mac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'delta-rental').update(body).digest('hex')
+    return `pv1.${db.pricingRule.version}.${mac}`
+  }
+  private buildReprice(db: Db, rule: PricingRule) {
+    const currentVersion = db.pricingRule.version
+    const candidate = { ...clone(rule), version: currentVersion + 1 }
+    const affected: { accountId: string; accountNo: string; status: Account['status']; oldRuleVersion: number; oldPrice: ReturnType<typeof priceOf>; newPrice: ReturnType<typeof priceOf>; delta: number; changed: boolean }[] = []
+    const skipped: { accountId: string; accountNo: string; status: Account['status']; reason: 'RENTED' | 'SETTLING' | 'PRICING_ERROR'; ruleVersion: number; message?: string }[] = []
+    const updates: { account: Account; quote: PricingResult }[] = []
+    for (const a of db.accounts) {
+      if (a.deleted) continue
+      const base = { accountId: a.id, accountNo: a.accountNo, status: a.status }
+      if (a.status === 'rented' || a.status === 'settling') {
+        skipped.push({ ...base, reason: a.status === 'rented' ? 'RENTED' : 'SETTLING', ruleVersion: a.quote.ruleVersion })
+        continue
+      }
+      try {
+        const quote = pricing(toPricingInput(a), candidate)
+        const oldPrice = priceOf(a.quote)
+        const newPrice = priceOf(quote)
+        affected.push({ ...base, oldRuleVersion: a.quote.ruleVersion, oldPrice, newPrice, delta: newPrice.renterRent - oldPrice.renterRent, changed: (Object.keys(oldPrice) as (keyof typeof oldPrice)[]).some((k) => oldPrice[k] !== newPrice[k]) })
+        updates.push({ account: a, quote })
+      } catch (e) {
+        skipped.push({ ...base, reason: 'PRICING_ERROR', ruleVersion: a.quote.ruleVersion, message: e instanceof Error ? e.message : '计价失败' })
+      }
+    }
+    const summary = {
+      affectedCount: affected.length,
+      changedCount: affected.filter((x) => x.changed).length,
+      skippedCount: skipped.length,
+      totalDelta: affected.reduce((s, x) => s + x.delta, 0),
+    }
+    return {
+      candidate,
+      updates,
+      preview: { baseVersion: currentVersion, nextVersion: candidate.version, previewToken: this.previewToken(db, rule), affected, skipped, summary },
     }
   }
   getValuationRule(db: Db, user: User | null) {

@@ -161,18 +161,21 @@ describe('订单、押金与号主应付', () => {
   it('登记订单使用账号报价当时的规则版本，不跟后来保存的规则', () => {
     const { db, eng, as } = setup()
     const ops = as('ops')
-    const acc = db.accounts.find((a) => a.status === 'listed' && a.source === 'consign')!
-    const oldRent = acc.quote.coinRent
-    const ver = acc.quote.ruleVersion
+    const rented = db.accounts.find((a) => a.status === 'rented')!
+    const oldRent = rented.quote.coinRent
+    const ver = rented.quote.ruleVersion
+    const order = db.orders.find((o) => o.accountId === rented.id && o.status === 'active')!
+    const orderRent = order.coinRent
     const current = eng.getPricingRule(db, ops)
-    eng.savePricingRule(db, ops, { ...current, discountTiers: [{ threshold: 0, ratioPlus: 0, discount: 50 }], triggerMetric: 'coinAmount' }, '全场五折')
-    const preview = eng.previewOrder(db, as('cs'), acc.id, 'wx_hist_rule')
+    const next = { ...current, discountTiers: [{ threshold: 0, ratioPlus: 0, discount: 50 }], triggerMetric: 'coinAmount' as const }
+    const pv = eng.previewPricingRule(db, ops, next)
+    eng.savePricingRule(db, ops, next, '全场五折', { baseVersion: pv.baseVersion, previewToken: pv.previewToken })
+    assert.equal(rented.quote.coinRent, oldRent)
+    assert.equal(rented.quote.ruleVersion, ver)
+    assert.equal(order.coinRent, orderRent)
+    const preview = eng.previewOrder(db, as('cs'), rented.id, 'wx_hist_rule')
     assert.equal(preview.ruleVersion, ver)
     assert.equal(preview.coinRent, oldRent)
-    const order = eng.createOrder(db, as('cs'), { accountId: acc.id, renterContact: 'wx_hist_rule', startAt: new Date(NOW).toISOString(), rentalDays: 2, deposit: 0, extraFee: 0, remark: '' })
-    assert.equal(order.ruleVersion, ver)
-    assert.equal(order.coinRent, oldRent)
-    assert.equal(order.ownerPayable, acc.quote.ownerSettlement)
   })
   it('Q8：租期只改到期日，不改租金；天数来自周期字典且不参与金额', () => {
     const { db, eng, as } = setup()
@@ -213,8 +216,10 @@ describe('规则版本与回收入库', () => {
     const ops = as('ops')
     const current = eng.getPricingRule(db, ops)
     assert.equal(current.version, 1)
-    const saved = eng.savePricingRule(db, ops, { ...current, channelFeeRates: { ...current.channelFeeRates, 普通区: 8 } }, '费率调整')
-    assert.equal(saved.version, 2)
+    const next = { ...current, channelFeeRates: { ...current.channelFeeRates, 普通区: 8 } }
+    const pv = eng.previewPricingRule(db, ops, next)
+    const saved = eng.savePricingRule(db, ops, next, '费率调整', { baseVersion: pv.baseVersion, previewToken: pv.previewToken })
+    assert.equal(saved.rule.version, 2)
     assert.equal(eng.pricingRuleVersion(db, ops, 1).channelFeeRates['普通区'], 5)
     assert.equal(eng.getPricingRule(db, ops).channelFeeRates['普通区'], 8)
     const hist = eng.ruleHistory(db, ops)

@@ -1,3 +1,4 @@
+import type { PricingRulePreview, RepriceSummary } from '../domain/reprice'
 import type { ImportContext } from '../domain/importAccounts'
 // API 抽象层：页面只依赖这个接口。当前实现为 localStorage（src/api/local.ts），
 // 接后端时新增一个 http 实现（同域 /api），在 src/api/index.ts 切换即可。
@@ -109,7 +110,10 @@ export interface Api {
 
   // 后台：规则（带版本）
   getPricingRule(): Promise<PricingRule>
-  savePricingRule(rule: PricingRule, summary?: string): Promise<PricingRule>
+  /** 改规则预览：按候选规则重算库存（不落库），返回受影响 / 跳过的账号与 previewToken */
+  previewPricingRule(rule: PricingRule): Promise<PricingRulePreview>
+  /** 保存规则并按新规则原子重算未出租库存；confirm 取自预览（baseVersion + previewToken） */
+  savePricingRule(rule: PricingRule, summary?: string, confirm?: PricingRuleConfirm): Promise<PricingRuleSaveResult>
   getValuationRule(): Promise<ValuationRule>
   saveValuationRule(rule: ValuationRule, summary?: string): Promise<ValuationRule>
   ruleHistory(): Promise<{ pricing: RuleVersionMeta[]; valuation: RuleVersionMeta[] }>
@@ -126,3 +130,7 @@ export interface Api {
   auditLogs(): Promise<AuditLog[]>
   resetDemo(): Promise<void>
 }
+
+export interface PricingRuleConfirm { baseVersion: number; previewToken: string }
+/** repriced = null：后端未实现重算（旧接口直接回 PricingRule） */
+export interface PricingRuleSaveResult { rule: PricingRule; repriced: RepriceSummary | null }
