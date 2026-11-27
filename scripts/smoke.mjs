@@ -9,7 +9,7 @@ const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
 const results = []
-const check = async (name, fn) => { try { await fn(); results.push(['PASS', name]) } catch (e) { results.push(['FAIL', name, String(e).slice(0, 200)]) } }
+const check = async (name, fn) => { try { await fn(); results.push(['PASS', name]) } catch (e) { results.push(['FAIL', name, String(e).slice(0, 200)]); await page.screenshot({ path: `${dir}/FAIL-${results.length}.png` }).catch(() => {}) } }
 const base = url.replace(/#.*$/, '')
 
 await check('未登录跳转登录页并显示演示账号', async () => {
@@ -56,6 +56,7 @@ await check('出租算价', async () => {
 })
 await check('回收估值 + 提交得单号', async () => {
   await page.goto(base + '#/recycle')
+  await page.waitForSelector('.card-title:text-is("回收估值")')
   await page.fill('input[placeholder="微信 / QQ / 手机"]', 'wx_smoke_' + Date.now())
   for (const [label, opt] of [['大区', 'VX区'], ['上号方式', '账密']]) {
     await page.locator(`.el-form-item:has(label:text-is("${label}")) .el-select`).click()

@@ -13,10 +13,10 @@
               <el-col :span="12"><el-form-item label="总资产(M)" prop="totalAssets"><el-input-number v-model="f.totalAssets" :min="0" /></el-form-item></el-col></el-row>
             <el-row><el-col :span="12"><el-form-item label="等级"><el-input-number v-model="f.level" :min="1" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="保险格数"><el-select v-model="f.safeBox"><el-option v-for="o in dicts.safeBoxes" :key="o" :label="o + ' 格'" :value="o" /></el-select></el-form-item></el-col></el-row>
-            <el-row><el-col :span="6"><el-form-item label="AWM"><el-input-number v-model="f.awmCount" :min="0" style="width:100px" /></el-form-item></el-col>
-              <el-col :span="6"><el-form-item label="6头" label-width="50px"><el-input-number v-model="f.helmet6Count" :min="0" style="width:100px" /></el-form-item></el-col>
-              <el-col :span="6"><el-form-item label="6甲" label-width="50px"><el-input-number v-model="f.armor6Count" :min="0" style="width:100px" /></el-form-item></el-col>
-              <el-col :span="6"><el-form-item label="体验卡" label-width="60px"><el-input-number v-model="f.experienceCardCount" :min="0" style="width:100px" /></el-form-item></el-col></el-row>
+            <el-row><el-col :span="6"><el-form-item label="AWM" label-width="60px"><el-input-number v-model="f.awmCount" :min="0" style="width:120px" /></el-form-item></el-col>
+              <el-col :span="6"><el-form-item label="6头" label-width="50px"><el-input-number v-model="f.helmet6Count" :min="0" style="width:120px" /></el-form-item></el-col>
+              <el-col :span="6"><el-form-item label="6甲" label-width="50px"><el-input-number v-model="f.armor6Count" :min="0" style="width:120px" /></el-form-item></el-col>
+              <el-col :span="6"><el-form-item label="体验卡" label-width="60px"><el-input-number v-model="f.experienceCardCount" :min="0" style="width:120px" /></el-form-item></el-col></el-row>
             <el-form-item label="皮肤"><el-select v-model="f.skins" multiple filterable style="width:100%"><el-option v-for="s in dicts.skins" :key="s.name" :label="`${s.name}（${s.category}）`" :value="s.name" /></el-select></el-form-item>
             <el-form-item label="封禁记录"><el-switch v-model="f.banRecord" active-text="有" inactive-text="无" /></el-form-item>
             <el-form-item label="备注"><el-input v-model="f.remark" type="textarea" :rows="2" /></el-form-item>
