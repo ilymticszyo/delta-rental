@@ -1,0 +1,10 @@
+:root { --accent: #c9a24d; }
+html, body { margin: 0; background: #f3f4f6; font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+.page { max-width: 1400px; margin: 0 auto; padding: 16px 20px 40px; }
+.money { color: #d0463b; font-weight: 600; }
+.muted { color: #888; font-size: 12px; }
+.row-gap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.card-title { font-weight: 600; font-size: 16px; }
+.stat { cursor: pointer; }
+.stat .num { font-size: 28px; font-weight: 700; }
+pre.copy { background: #f7f7f7; padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 13px; }
