@@ -172,6 +172,8 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 
 ### 6.1 改计价规则 → 重算库存（v0.4，产品已确认）
 
+> **取代第 12 节第 4 条**（“改规则不自动重算”）。为避免与后端 PR 的文档改动冲突，第 12 节原文暂未改，以本节为准。
+
 改计价规则时，**未出租的库存账号自动按新规则重算报价**；租赁中 / 待结算的账号和所有已登记订单不变。参考实现 `src/domain/reprice.ts`（`planReprice`）。
 
 1. `POST /rules/pricing/preview {rule}`（ops / admin，**不落库**）→ `PricingRulePreview { baseVersion, nextVersion, previewToken, affected[], skipped[], summary }`。
@@ -275,7 +277,7 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 1. **鉴权**：不透明 Bearer 令牌（≥128 位随机，服务端只存 SHA-256）。12 小时滑动续期，绝对最长 7 天。退出、停用用户立即吊销该用户全部令牌。不用 JWT，也不下发 Cookie。无效或过期 → 401 `UNAUTHENTICATED`。登录失败统一 `401 INVALID_CREDENTIALS`；停用账号登录 `403 USER_DISABLED`。
 2. **截图**：存在本机磁盘（compose 卷 `uploads`）。`url` 为 HMAC 签名地址 `/api/uploads/{id}/content?exp=&sig=`，有效期 1 小时，列表接口每次重签。`<img>` 不带 Authorization。号主只能把**自己上传且未绑定**的 id，或该账号已有的 id，绑到自己的号。
 3. **分页**：首版就做服务端分页。`page` / `pageSize`（默认 50，最大 200，超出按 200）。前端可以继续用 `pageSize=200` 翻页拉全量。
-4. ~~**改规则不自动重算**已有库存报价。~~ **v0.4 变更（产品已确认）**：改计价规则时未出租的库存账号自动按新规则重算（先预览、确认后原子重算，见 6.1）；租赁中 / 待结算账号和已登记订单不变。每条报价快照保留自己的 `ruleVersion`。
+4. **改规则不自动重算**已有库存报价。每条报价快照保留自己的 `ruleVersion`。不提供批量重算接口（留给以后单独做）。
 5. **号主登录**：用户行带 `ownerId`，与号主档案 1:1（种子里 owner1↔ow1、owner2↔ow2）。管理员用 `POST /staff` 新建登录并绑定档案，用 `POST /staff/{username}/password` 重置密码（立即吊销旧令牌）。这两个接口只对管理员开放，没有自助改密。密码 8–128 位，bcrypt 存储。
 6. **字典与客服排班**：只读。字典走 `GET /accounts/import/context` 与 `GET /pricing/options`，排班走 `GET /cs-agents`。管理接口以后再加。
 7. **幂等**：`POST /orders`、`POST /accounts/import`、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`。同一用户、同一路径、同一请求体在 24 小时内重放当时的响应；同一把钥匙配不同请求体 → 409 `DUPLICATE`。
