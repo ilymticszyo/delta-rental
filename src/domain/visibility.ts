@@ -17,7 +17,12 @@ export function pricingFor(role: Role, res: PricingResult): Partial<PricingResul
 export function lobbyAccountFor(role: Role, a: Account): LobbyAccount {
   const { quote, ownerContact, ownerId, formerOwnerId, costAmount, ...rest } = a
   if (can(role, 'seeCommission')) return { ...rest, quote: { ...quote }, ownerContact, ownerId, costAmount }
-  if (role === 'owner') return { ...rest, quote: null }
+  if (role === 'owner') {
+    // 号主不看任何租价参数：押金、纯币比例、折扣方式也属于出租报价
+    const { deposit, coinRatio, discountMode, customDiscountPercent, ...assetOnly } = rest
+    void deposit; void coinRatio; void discountMode; void customDiscountPercent
+    return { ...assetOnly, quote: null }
+  }
   return { ...rest, quote: pricingFor(role, quote) }
 }
 

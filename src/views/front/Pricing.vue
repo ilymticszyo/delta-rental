@@ -74,15 +74,16 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance } from 'element-plus'
 import { api } from '../../api'
-import { dicts, type PricingRule } from '../../config/rules'
+import { dicts } from '../../config/rules'
+import type { PricingOptions } from '../../api/types'
 import { pricingToText } from '../../domain/pricing'
 import type { PricingResult } from '../../domain/types'
 import { can } from '../../domain/permissions'
 import { copy, run } from '../../utils'
 
-const rule = ref<PricingRule>()
-const channels = computed(() => Object.keys(rule.value?.channelFeeRates ?? {}))
-const cycles = computed(() => Object.keys(rule.value?.cycleValues ?? {}))
+const rule = ref<PricingOptions>()
+const channels = computed(() => rule.value?.channels ?? [])
+const cycles = computed(() => rule.value?.cycles ?? [])
 const f = reactive({
   ownerContact: '', region: '', loginMethod: '', assistTime: '全天', coinAmount: 100, totalAssets: 150, safeBox: 6, awmCount: 0,
   helmet6Count: 0, armor6Count: 0, skins: [] as string[], coinRatio: 20, channel: '普通区', cycle: '10M/天', deposit: 0,
@@ -106,5 +107,5 @@ async function calc() {
   const r = await run(() => api.calcPricing({ ...f }))
   if (r) res.value = r
 }
-onMounted(async () => { rule.value = await api.getPricingRule() })
+onMounted(async () => { rule.value = await api.pricingOptions() })
 </script>

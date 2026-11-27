@@ -7,7 +7,7 @@ import type { Report, ReportDimension } from '../domain/reports'
 import type {
   AccountAdminView, AccountInput, AccountStatus, Attachment, CsAgent, DashboardStats, DepositEntry, LobbyAccount, OrderInput, OwnerAccountView,
   OwnerPayableEntry, OwnerProfile, PricingInput, PricingResult, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder,
-  Role, StaffUser, User, ValuationInput, ValuationResult,
+  Role, StaffUser, User, ValuationInput, ValuationResult, NewAttachment,
 } from '../domain/types'
 import type { AuditLog } from '../mock/seed'
 export type { AuditLog }
@@ -26,10 +26,17 @@ export interface OrderPreview {
   regularApplied: boolean
   depositWaived: boolean
 }
-export interface OwnerListingInput { asset: ValuationInput; assistTime: string; remark: string; attachments: Omit<Attachment, 'id' | 'uploadedBy' | 'at'>[]; fromRecycleId?: string }
+export interface OwnerListingInput { asset: ValuationInput; assistTime: string; remark: string; attachments: NewAttachment[]; fromRecycleId?: string }
+/** 运行模式与开关：mock = 浏览器本地演示；http = 真实后端。demo=true 时才显示演示专用 UI（演示账号、角色切换、重置数据） */
+export interface ApiFeatures { mode: 'mock' | 'http'; demo: boolean; serverVersion?: string }
+/** 前台算价下拉选项（任何登录用户可读；不含服务费率等内部参数） */
+export interface PricingOptions { version: number; channels: string[]; cycles: string[]; customDiscountMin: number; customDiscountMax: number; defaultDeposit: number }
 export interface DemoAccount { username: string; password: string; role: Role; displayName: string }
 
 export interface Api {
+  /** 启动时调用一次（mount 之前）：http 模式读取 /api/meta 与 /api/auth/me，之后 currentUser() 可同步读取 */
+  init(): Promise<void>
+  features(): ApiFeatures
   // 认证
   login(username: string, password: string): Promise<User>
   logout(): Promise<void>
@@ -39,6 +46,7 @@ export interface Api {
   // 前台
   listListedAccounts(): Promise<LobbyAccount[]>
   getAccount(id: string): Promise<LobbyAccount | undefined>
+  pricingOptions(): Promise<PricingOptions>
   calcPricing(input: PricingInput): Promise<Partial<PricingResult>>
   calcValuation(input: ValuationInput): Promise<ValuationResult>
   submitRecycle(input: ValuationInput, opts?: { sourceAccountId?: string }): Promise<RecycleRequest>

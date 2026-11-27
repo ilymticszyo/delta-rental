@@ -14,7 +14,7 @@
         </el-menu>
         <div class="user">
           <router-link v-if="user && can(user.role, 'adminArea')" to="/admin" class="adm">后台管理</router-link>
-          <RoleSwitcher dark />
+          <RoleSwitcher v-if="demo" dark />
           <span>{{ user?.displayName }}</span>
           <el-button size="small" text style="color:#cfd3da" @click="logout">退出</el-button>
         </div>
@@ -29,6 +29,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../../api'
 import { can } from '../../domain/permissions'
 import RoleSwitcher from '../../components/RoleSwitcher.vue'
+const demo = api.features().demo
 const route = useRoute()
 const router = useRouter()
 const user = api.currentUser()

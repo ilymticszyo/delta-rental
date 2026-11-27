@@ -7,20 +7,19 @@ import { buildReport, platformIncome, type ReportDimension } from '../domain/rep
 import { calcValuation, validateValuationInput } from '../domain/valuation'
 import { lobbyAccountFor, pricingFor, toOwnerView } from '../domain/visibility'
 import type {
-  Account, AccountAdminView, AccountInput, AccountStatus, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep, OwnerPayableEntry,
+  Account, AccountAdminView, AccountInput, Attachment, AccountStatus, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep, OwnerPayableEntry,
   OwnerProfile, PricingInput, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder, StaffUser, User, ValuationInput,
 } from '../domain/types'
 import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL } from '../domain/types'
 import { buildSeedDb, demoUsers, SEED_VERSION, toPricingInput, type Db, type DbUser } from '../mock/seed'
-import type { Api, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput } from './types'
+import type { Api, ApiFeatures, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PricingOptions } from './types'
 
 const DB_KEY = 'dr:v1:db'
 const SESSION_KEY = 'dr:v1:session'
 const DAY = 86400000
 
-export class ApiError extends Error {
-  constructor(message: string, public code = 400) { super(message) }
-}
+import { ApiError } from './errors'
+export { ApiError }
 
 const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)))
 const nowIso = () => new Date().toISOString()
@@ -73,6 +72,18 @@ export class LocalApi implements Api {
     if (!u) throw new ApiError('未登录', 401)
     return u
   }
+  /** 已有截图保留（只认本账号原有的 id），新截图分配 id；最多 5 张、单张 ≤1MB */
+  private bindAttachments(list: AccountInput['attachments'], prev: Attachment[], accountId: string): Attachment[] {
+    if (!list) return prev
+    if (list.length > 5) throw new ApiError('最多 5 张截图')
+    const u = this.user(), t = nowIso()
+    return list.map((x, i) => {
+      if ('id' in x && x.id) { const old = prev.find((p) => p.id === x.id); if (!old) throw new ApiError('截图不存在'); return old }
+      if (!/^data:image\//.test(x.dataUrl)) throw new ApiError('仅支持图片')
+      if (x.dataUrl.length > 1.4 * 1024 * 1024) throw new ApiError('单张截图不超过 1MB')
+      return { id: `f${accountId}-${Date.now() % 100000}-${i}`, name: x.name, dataUrl: x.dataUrl, uploadedBy: u.username, at: t }
+    })
+  }
   /** 自增账号序号，跳过已被导入占用的 DF 编号 */
   private bumpAccountSeq(db: Db) {
     const taken = new Set(db.accounts.map((a) => a.accountNo.toUpperCase()))
@@ -109,6 +120,13 @@ export class LocalApi implements Api {
     return this.toUser(u)
   }
   private toUser(u: DbUser): User { return { username: u.username, displayName: u.displayName, role: u.role, ...(u.ownerId ? { ownerId: u.ownerId } : {}) } }
+  async init() { /* mock：无需预取 */ }
+  features(): ApiFeatures { return { mode: 'mock', demo: true } }
+  async pricingOptions(): Promise<PricingOptions> {
+    this.user()
+    const r = this.load().pricingRule
+    return { version: r.version, channels: Object.keys(r.channelFeeRates), cycles: Object.keys(r.cycleValues), customDiscountMin: r.customDiscountMin, customDiscountMax: r.customDiscountMax, defaultDeposit: r.defaultDeposit }
+  }
   async logout() { this.storage.removeItem(SESSION_KEY) }
   currentUser(): User | null {
     const db = this.load() // 先加载（旧版本数据会在此重置并清会话）
@@ -341,13 +359,13 @@ export class LocalApi implements Api {
       if (input.id) {
         const a = this.findAccount(db, input.id)
         if (input.status !== a.status) throw new ApiError('状态请用状态操作按钮修改')
-        Object.assign(a, input, { quote, updatedAt: t, attachments: input.attachments ?? a.attachments })
+        Object.assign(a, input, { quote, updatedAt: t, attachments: this.bindAttachments(input.attachments, a.attachments, a.id) })
         this.audit(db, '编辑账号', `${a.accountNo}`)
         return this.adminView(db, a)
       }
       if (!['draft', 'listed', 'off', 'held'].includes(input.status)) throw new ApiError('新增账号状态只能为草稿 / 空闲可租 / 已下架 / 已回收持有')
       this.bumpAccountSeq(db)
-      const a: Account = { ...input, attachments: input.attachments ?? [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
+      const a: Account = { ...input, attachments: this.bindAttachments(input.attachments, [], `a${db.seq.account}`), id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
       db.accounts.unshift(a)
       this.audit(db, '新增账号', `${a.accountNo}（${ACCOUNT_STATUS_LABEL[a.status]}）`)
       return this.adminView(db, a)
@@ -445,7 +463,7 @@ export class LocalApi implements Api {
         const r = db.renters.find((x) => norm(x.contact) === norm(input.renterContact))
         this.audit(db, '拦截黑名单', `${input.renterContact.trim()} 尝试租 ${a.accountNo}`)
         this.save(db)
-        throw new ApiError(`该租客在黑名单中，禁止登记${r?.note ? `（${r.note}）` : ''}`, 403)
+        throw new ApiError(`该租客在黑名单中，禁止登记${r?.note ? `（${r.note}）` : ''}`, 409, 'RENTER_BLACKLISTED')
       }
       if (!(input.rentalDays >= 1)) throw new ApiError('租期至少 1 天')
       if (input.deposit < 0 || input.extraFee < 0) throw new ApiError('金额不能为负')
@@ -668,7 +686,7 @@ export class LocalApi implements Api {
   }
 
   // ---------- 规则 ----------
-  async getPricingRule() { this.user(); return clone(this.load().pricingRule) }
+  async getPricingRule() { this.need('inventoryView'); return clone(this.load().pricingRule) }
   async savePricingRule(rule: PricingRule, summary = '') {
     const u = this.need('rulesEdit')
     return this.tx((db) => {

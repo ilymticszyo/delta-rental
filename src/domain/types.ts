@@ -46,7 +46,10 @@ export interface PricingResult {
   depositWaived: boolean
 }
 
-export interface Attachment { id: string; name: string; dataUrl: string; uploadedBy: string; at: string }
+/** 资产截图。dataUrl = 前端用于 <img src> 的地址：mock 下是 data URL；http 下由客户端把服务端返回的 url 映射过来 */
+export interface Attachment { id: string; name: string; dataUrl: string; uploadedBy: string; at: string; mime?: string; size?: number }
+/** 尚未上传的新截图（前端选择文件后、保存前） */
+export interface NewAttachment { name: string; dataUrl: string }
 
 export interface Account {
   id: string
@@ -88,7 +91,7 @@ export interface Account {
   updatedAt: string
 }
 
-export type AccountInput = Omit<Account, 'id' | 'accountNo' | 'quote' | 'createdAt' | 'updatedAt' | 'deleted' | 'attachments'> & { id?: string; attachments?: Attachment[] }
+export type AccountInput = Omit<Account, 'id' | 'accountNo' | 'quote' | 'createdAt' | 'updatedAt' | 'deleted' | 'attachments'> & { id?: string; attachments?: (Attachment | NewAttachment)[] }
 
 /** 后台库存视图：附带累计收入与回本进度（由订单汇总） */
 export interface AccountAdminView extends Account {
@@ -98,7 +101,10 @@ export interface AccountAdminView extends Account {
 }
 
 /** 前台大厅 / 详情视图：按角色裁剪字段 */
-export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount'> & {
+export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount' | 'deposit' | 'coinRatio' | 'discountMode'> & {
+  deposit?: number // 号主视图不含（下同）
+  coinRatio?: number
+  discountMode?: Account['discountMode']
   quote: Partial<PricingResult> | null
   ownerContact?: string
   ownerId?: string

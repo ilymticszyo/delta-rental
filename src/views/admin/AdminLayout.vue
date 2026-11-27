@@ -12,8 +12,8 @@
         <div class="row-gap">
           <router-link to="/accounts">前台大厅 ↗</router-link>
           <router-link v-if="user && can(user.role, 'ownerPortalAll')" to="/owner/accounts">号主门户 ↗</router-link>
-          <el-popconfirm title="清空本浏览器的演示数据并恢复初始？" @confirm="reset"><template #reference><el-button size="small">重置演示数据</el-button></template></el-popconfirm>
-          <RoleSwitcher />
+          <el-popconfirm v-if="demo" title="清空本浏览器的演示数据并恢复初始？" @confirm="reset"><template #reference><el-button size="small">重置演示数据</el-button></template></el-popconfirm>
+          <RoleSwitcher v-if="demo" />
           <span>{{ user?.displayName }}</span>
           <el-button size="small" @click="logout">退出</el-button>
         </div>
@@ -29,6 +29,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '../../api'
 import { can, type Cap } from '../../domain/permissions'
 import RoleSwitcher from '../../components/RoleSwitcher.vue'
+const demo = api.features().demo
 const router = useRouter()
 const route = useRoute()
 const user = api.currentUser()
