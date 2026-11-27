@@ -32,14 +32,25 @@
 
 ## 开发
 
+两种运行模式，由构建时的 `VITE_API_MODE` 决定（默认 `mock`）：
+
+- **mock**：数据存在浏览器 localStorage，带演示账号。GitHub Pages 演示站用的就是这个模式。
+- **http**：请求同域 `/api`，接真实后端。接口契约见 [`docs/api-contract.md`](docs/api-contract.md) 和 [`docs/openapi.yaml`](docs/openapi.yaml)。
+
 ```bash
 npm ci
-npm run dev        # 本地开发
-npm test           # 单元测试（vitest）
-npm run build      # 类型检查 + 构建
+npm run dev          # mock 模式开发
+npm run fake-api     # 按契约实现的假后端（:8080，内部复用 mock 逻辑）
+npm run dev:http     # http 模式开发，/api 代理到 VITE_API_PROXY（默认 http://localhost:8080）
+npm test             # 单元测试 + 契约测试（vitest）
+npm run test:contract
+npm run build        # mock 构建 → dist/（Pages）
+npm run build:prod   # http 构建 → dist/（服务器）
 npx vite preview --port 4173 &
-node scripts/smoke.mjs http://localhost:4173/ shots   # 端到端点击（Playwright + 系统 Chrome）
+node scripts/smoke.mjs http://localhost:4173/ shots   # 端到端点击测试（Playwright + 系统 Chrome）
 ```
+
+环境变量见 `.env.example`。服务器部署（1Panel / OpenResty / Docker / HTTPS）见 [`deploy/README.md`](deploy/README.md)。
 
 ## 已知不足
 
