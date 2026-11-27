@@ -119,7 +119,7 @@ const reset = () => Object.assign(f, empty())
 
 const sortLabels = { coin: '哈夫币（纯币）', price: '价格', ratio: '比例', awm: 'AWM', h6: '六头', a6: '六甲', newest: '最新上架' }
 const sortGetters: Record<string, (a: Account) => number | string> = {
-  coin: (a) => a.coinAmount, price: (a) => a.quote?.totalAmount ?? 0, ratio: (a) => a.coinRatio, awm: (a) => a.awmCount,
+  coin: (a) => a.coinAmount, price: (a) => a.quote?.totalAmount ?? 0, ratio: (a) => a.coinRatio ?? 0, awm: (a) => a.awmCount,
   h6: (a) => a.helmet6Count, a6: (a) => a.armor6Count, newest: (a) => a.createdAt,
 }
 const pref = JSON.parse(localStorage.getItem('dr:v1:lobbyPref') || '{}')

@@ -2,15 +2,16 @@
   <div class="login-wrap">
     <el-card class="login-card">
       <h2 style="margin:0 0 4px">{{ title }}</h2>
-      <p class="muted" style="margin:0 0 12px">三角洲行动 · 账号租赁与回收估值（内部系统 v0.2）</p>
+      <p class="muted" style="margin:0 0 12px">三角洲行动 · 账号租赁与回收估值（内部系统 v{{ version }}）</p>
+      <el-alert v-if="$route.query.expired" type="info" :closable="false" show-icon style="margin-bottom:10px" title="登录已失效，请重新登录" />
       <el-alert v-if="$route.query.denied" type="warning" :closable="false" show-icon style="margin-bottom:10px" title="当前角色无权进入后台，请换一个员工账号" />
       <el-form @submit.prevent="submit" label-position="top">
         <el-form-item label="账号"><el-input v-model="username" name="username" placeholder="请输入账号" /></el-form-item>
         <el-form-item label="密码"><el-input v-model="password" name="password" type="password" show-password placeholder="请输入密码" /></el-form-item>
         <el-button type="primary" native-type="submit" style="width:100%" :loading="loading">登录</el-button>
       </el-form>
-      <div class="muted" style="margin:14px 0 6px">演示账号（点击填入）：</div>
-      <el-table :data="demos" size="small" class="demo-table" @row-click="fill">
+      <div v-if="demos.length" class="muted" style="margin:14px 0 6px">演示账号（点击填入）：</div>
+      <el-table v-if="demos.length" :data="demos" size="small" class="demo-table" @row-click="fill">
         <el-table-column label="角色" width="80"><template #default="{ row }"><el-tag size="small">{{ ROLE_LABEL[row.role as Role] }}</el-tag></template></el-table-column>
         <el-table-column prop="username" label="账号" width="80" />
         <el-table-column prop="password" label="密码" width="90" />
@@ -29,6 +30,7 @@ import { can } from '../domain/permissions'
 import { ROLE_LABEL, type Role } from '../domain/types'
 import { homeOf } from '../router'
 const props = defineProps<{ title: string; admin?: boolean }>()
+const version = __APP_VERSION__
 const username = ref('')
 const password = ref('')
 const loading = ref(false)

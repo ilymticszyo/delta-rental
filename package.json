@@ -4,9 +4,14 @@
   "description": "",
   "scripts": {
     "dev": "vite",
+    "dev:http": "vite --mode server",
     "build": "vue-tsc --noEmit && vite build",
+    "build:prod": "vue-tsc --noEmit && vite build --mode server",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:contract": "vitest run tests/contract",
+    "smoke": "node scripts/smoke.mjs",
+    "fake-api": "vite-node scripts/fake-api.ts"
   },
   "type": "module",
   "dependencies": {
@@ -18,15 +23,20 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^13.1.0",
     "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-vue": "^6.0.11",
     "@vue/test-utils": "^2.6.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "jsdom": "^31.0.1",
     "playwright": "^1.65.1",
     "typescript": "^6.0.3",
     "vite": "^8.4.0",
+    "vite-node": "^6.0.0",
     "vitest": "^5.1.2",
-    "vue-tsc": "^3.3.14"
+    "vue-tsc": "^3.3.14",
+    "yaml": "^2.9.1"
   },
   "private": true
 }

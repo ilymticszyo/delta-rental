@@ -6,5 +6,9 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import './style.css'
 import App from './App.vue'
 import { router } from './router'
+import { api } from './api'
 
-createApp(App).use(ElementPlus, { locale: zhCn }).use(router).mount('#app')
+// http 模式下先取 /api/meta 与当前登录用户，再挂载（路由守卫需要同步读取 currentUser）
+api.init().catch((e) => console.error('API 初始化失败', e)).finally(() => {
+  createApp(App).use(ElementPlus, { locale: zhCn }).use(router).mount('#app')
+})

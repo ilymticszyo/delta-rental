@@ -1,0 +1,1505 @@
+openapi: 3.0.3
+info:
+  title: 三角洲行动 · 账号租赁与回收估值 API
+  version: 0.3.0-draft
+  description: |
+    前端（Vue，src/api/http.ts）与后端之间的契约。人类可读说明见 docs/api-contract.md，两者冲突时以本文件为准并修正另一份。
+
+    - 所有路径都在相对前缀 `/api` 下（servers.url = /api），与前端同域部署。
+    - 鉴权：`Authorization: Bearer <token>`（不透明会话令牌，服务端可吊销）。
+    - 金额：**整数，单位人民币元**（不是分）。百分比为 0–100 的数字，系数为小数。
+    - 时间：ISO 8601 且带时区（服务端输出 UTC `Z`，如 `2026-11-27T14:37:36.000Z`）；纯日期 `YYYY-MM-DD` 按 Asia/Shanghai。
+    - 列表：`page`（从 1 开始）、`pageSize`（默认 50，最大 200）、`sort`（`字段` 升序 / `-字段` 降序，逗号分隔）、`q` 关键字及各资源过滤参数；响应 `{items,total,page,pageSize}`。
+    - 错误：`{ "error": { "code", "message", "fields"?, "details"?, "requestId"? } }`。
+    - 每个操作的 `x-roles` 列出允许的角色（owner 号主 / member 内部成员 / cs 客服 / ops 运营 / admin 管理员）；不在列表中的已登录角色返回 403。
+    - 服务端是权限、字段裁剪、算价 / 估值、导入校验与状态流转的唯一权威；客户端算出的任何金额只作预览，服务端忽略并重算。
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+tags:
+  - { name: meta }
+  - { name: auth }
+  - { name: lobby, description: 前台大厅 / 算价 / 估值 / 客服 }
+  - { name: owner, description: 号主门户（E1–E4） }
+  - { name: accounts, description: 后台库存与批量导入 }
+  - { name: uploads }
+  - { name: orders, description: 出租订单、生命周期事件、押金台账、号主付款 }
+  - { name: payables, description: 号主应付台账 }
+  - { name: recycles }
+  - { name: profiles, description: 租客 / 号主档案（C12） }
+  - { name: rules, description: 计价规则与回收估值依据（版本化） }
+  - { name: reports }
+  - { name: admin, description: 看板、员工、操作日志、演示 }
+
+paths:
+  /meta:
+    get:
+      tags: [meta]
+      operationId: getMeta
+      summary: 运行信息与功能开关（无需登录）
+      security: []
+      x-roles: [public]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Meta' } } } }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 账号密码登录，返回会话令牌
+      security: []
+      x-roles: [public]
+      description: 失败统一返回 401 INVALID_CREDENTIALS（不区分账号不存在 / 密码错）；停用账号 403 USER_DISABLED；同一账号 / IP 失败过多 429 RATE_LIMITED。
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooMany' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 吊销当前令牌
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '204': { description: 已退出 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: me
+      summary: 当前登录用户（启动时调用；令牌失效 / 用户被停用返回 401）
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, required: [user], properties: { user: { $ref: '#/components/schemas/User' } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /lobby/accounts:
+    get:
+      tags: [lobby]
+      operationId: listLobbyAccounts
+      summary: 大厅账号（仅 status=listed）
+      description: |
+        字段按角色裁剪：owner → quote 为 null，且不含 ownerId/ownerContact/costAmount；member → quote 只含租客应付字段（见 LobbyQuote），
+        不含 ownerId/ownerContact/costAmount；cs/ops/admin → 完整 quote 与号主字段。
+      x-roles: [owner, member, cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - $ref: '#/components/parameters/q'
+        - { name: region, in: query, schema: { type: string } }
+        - { name: channel, in: query, schema: { type: string } }
+        - { name: rank, in: query, schema: { type: string } }
+        - { name: safeBox, in: query, schema: { type: integer } }
+        - { name: minCoin, in: query, schema: { type: number } }
+        - { name: maxCoin, in: query, schema: { type: number } }
+        - { name: maxTotal, in: query, description: 租客总金额上限（元），owner 角色忽略, schema: { type: integer } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LobbyAccountPage' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /lobby/accounts/{id}:
+    get:
+      tags: [lobby]
+      operationId: getLobbyAccount
+      summary: 大厅账号详情（裁剪规则同列表；非员工访问未上架账号返回 404）
+      x-roles: [owner, member, cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LobbyAccount' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /pricing/options:
+    get:
+      tags: [lobby]
+      operationId: getPricingOptions
+      summary: 前台算价下拉选项（不含服务费率等内部参数）
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingOptions' } } } }
+  /pricing/quote:
+    post:
+      tags: [lobby]
+      operationId: quotePricing
+      summary: 出租精准算价（服务端按当前规则计算；填 renterContact 且为熟客时自动带入熟客优惠）
+      description: |
+        响应按角色裁剪：owner → 只有 {ruleVersion, ownerSettlement}；member → 去掉 serviceFeeRate/serviceFee/ownerSettlement；员工 → 完整 PricingResult。
+        请求里的 renterRegular 由服务端根据租客档案判定，客户端传入的值被忽略。
+      x-roles: [owner, member, cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PricingInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingResultPartial' } } } }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /valuation/quote:
+    post:
+      tags: [lobby]
+      operationId: quoteValuation
+      summary: 回收估值（服务端按当前估值依据计算）
+      x-roles: [owner, member, cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationResult' } } } }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /cs-agents:
+    get:
+      tags: [lobby]
+      operationId: listCsAgents
+      summary: 客服列表与排班
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/CsAgent' } } } } }
+  /cs-agents/current:
+    get:
+      tags: [lobby]
+      operationId: currentCsAgent
+      summary: 当前在班客服（按服务器时间、Asia/Shanghai 排班；无人在班时返回兜底客服或 null）
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, required: [agent], properties: { agent: { allOf: [ { $ref: '#/components/schemas/CsAgent' } ], nullable: true } } } } }
+
+  /recycles:
+    post:
+      tags: [recycles]
+      operationId: submitRecycle
+      summary: 提交回收申请（服务端重新估值并保存估值快照）
+      description: sourceAccountId 仅号主可用，且必须是本人账号、且该账号没有未结束的回收单，否则 403 / 409。
+      x-roles: [owner, member, cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecycleCreate' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/RecycleRequest' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    get:
+      tags: [recycles]
+      operationId: listRecycles
+      summary: 回收单（后台）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - $ref: '#/components/parameters/q'
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/RecycleStatus' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RecyclePage' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /recycles/mine:
+    get:
+      tags: [recycles]
+      operationId: myRecycles
+      summary: 我提交的回收单
+      x-roles: [owner, member, cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/page' }, { $ref: '#/components/parameters/pageSize' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RecyclePage' } } } }
+  /recycles/{id}/transitions:
+    post:
+      tags: [recycles]
+      operationId: transitionRecycle
+      summary: 回收单状态流转（见 RecycleStatus 流转表；quoted 需 staffPrice > 0；deal 只能走 to-inventory）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecycleTransition' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RecycleRequest' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /recycles/{id}/to-inventory:
+    post:
+      tags: [recycles]
+      operationId: recycleToInventory
+      summary: 成交入库（status quoted → deal）
+      description: 有 sourceAccountId 时把原账号转为自收（formerOwnerId=原号主，costAmount=成交价，status=held）；否则新建自收账号（status=held）。
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AccountAdminView' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /owner/accounts:
+    get:
+      tags: [owner]
+      operationId: ownerAccounts
+      summary: 号主门户：我的账号（owner 仅本人，含已转回收的原账号；admin 查看全部并带 ownerName）
+      description: 响应是白名单字段 OwnerAccountView，永远不含租客信息、订单、租金、服务费与抽成。
+      x-roles: [owner, admin]
+      parameters: [ { $ref: '#/components/parameters/page' }, { $ref: '#/components/parameters/pageSize' }, { $ref: '#/components/parameters/sort' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerAccountPage' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /owner/accounts/{id}:
+    get:
+      tags: [owner]
+      operationId: ownerAccount
+      summary: 号主账号详情（非本人账号返回 404，不泄露存在性）
+      x-roles: [owner, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerAccountView' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /owner/accounts/{id}/recycle-draft:
+    get:
+      tags: [owner]
+      operationId: ownerRecycleDraft
+      summary: 用本人账号的资产预填回收估值表单
+      x-roles: [owner]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationInput' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /owner/estimate:
+    post:
+      tags: [owner]
+      operationId: ownerEstimate
+      summary: 上架前估算每租期到手（按 PricingRule.ownerDefaults）
+      x-roles: [owner]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerEstimate' } } } }
+  /owner/listings:
+    post:
+      tags: [owner]
+      operationId: ownerSubmitListing
+      summary: 号主上架新账号 → status=draft（待确认），source=consign；运营确认后才上架
+      description: fromRecycleId 只能是本人的回收单。attachmentIds 必须是本人通过 /uploads 上传、尚未绑定的文件，最多 5 个。
+      x-roles: [owner]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerListingCreate' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerAccountView' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /accounts:
+    get:
+      tags: [accounts]
+      operationId: listAccounts
+      summary: 后台库存（含成本、累计收入、回本进度）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - { name: q, in: query, description: 编号 / 号主联系方式 / 号主名称, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AccountStatus' } }
+        - { name: source, in: query, schema: { $ref: '#/components/schemas/AccountSource' } }
+        - { name: ownerId, in: query, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AccountAdminPage' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [accounts]
+      operationId: createAccount
+      summary: 新增账号（服务端生成 accountNo 与报价快照 quote）
+      description: status 只能是 draft / listed / off / held。consign 时按 ownerContact 关联或新建号主档案。
+      x-roles: [ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountWrite' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/AccountAdminView' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /accounts/{id}:
+    put:
+      tags: [accounts]
+      operationId: updateAccount
+      summary: 编辑账号（按当前规则重算 quote）
+      description: status 只读——与当前值不同返回 409 INVALID_TRANSITION（改状态用 /status）。attachmentIds 省略 = 截图不变；传入 = 新的完整列表（顺序即展示顺序）。
+      x-roles: [ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AccountWrite' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AccountAdminView' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [accounts]
+      operationId: deleteAccount
+      summary: 逻辑删除（rented / settling 不能删 → 409）；编号永久占用
+      x-roles: [ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '204': { description: 已删除 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /accounts/{id}/status:
+    post:
+      tags: [accounts]
+      operationId: setAccountStatus
+      summary: 人工状态流转（draft→listed/off，listed→off，off→listed，held→listed/off；rented/settling 只能由订单驱动）
+      x-roles: [ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [status], properties: { status: { $ref: '#/components/schemas/AccountStatus' } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AccountAdminView' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /accounts/import/context:
+    get:
+      tags: [accounts]
+      operationId: importContext
+      summary: 批量导入的校验上下文（字典 + 已占用编号，含已删除），供前端预览校验
+      x-roles: [ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ImportContext' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /accounts/import:
+    post:
+      tags: [accounts]
+      operationId: importAccounts
+      summary: 批量导入（服务端逐行重新校验；合法行一次性以 draft 入库，非法行跳过；写操作日志）
+      description: |
+        rows 为前端用 SheetJS 读出的二维数组，第 0 行是表头（列名见模板，允许带 * 与全角括号），数组下标 + 1 = Excel 行号。
+        dryRun=true 时只返回逐行校验结果、不入库（响应 ImportPreview）。整份文件级错误（缺列、空文件、>500 行）→ 422 IMPORT_INVALID_FILE。
+        校验规则以 src/domain/importAccounts.ts 为参考实现，tests/import.test.ts 的用例必须同样成立。
+      x-roles: [ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ImportRequest' } } } }
+      responses:
+        '200':
+          description: OK（dryRun=false → ImportOutcome；dryRun=true → ImportPreview）
+          content: { application/json: { schema: { oneOf: [ { $ref: '#/components/schemas/ImportOutcome' }, { $ref: '#/components/schemas/ImportPreview' } ] } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /uploads:
+    post:
+      tags: [uploads]
+      operationId: upload
+      summary: 上传资产截图（multipart/form-data，字段名 file）
+      description: |
+        仅 image/png、image/jpeg、image/webp，≤ 1 MB（以服务端嗅探的真实类型为准）。返回的 id 在 24 小时内绑定到账号（AccountWrite.attachmentIds / OwnerListingCreate.attachmentIds），
+        否则清理。url 是可直接放进 <img src> 的地址（因为 <img> 不会带 Authorization 头，url 须为带签名与过期时间的地址，或同域受 Cookie 保护的地址，见契约「上传」）。
+      x-roles: [owner, ops, admin]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { type: object, required: [file], properties: { file: { type: string, format: binary } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Attachment' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/Unsupported' }
+
+  /orders:
+    get:
+      tags: [orders]
+      operationId: listOrders
+      summary: 出租订单（含 reminder 与本单号主应付余额）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - { name: q, in: query, description: 订单号 / 账号编号 / 租客联系方式, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/OrderStatus' } }
+        - { name: reminder, in: query, schema: { type: string, enum: [expiring, overdue] } }
+        - { name: accountId, in: query, schema: { type: string } }
+        - { name: from, in: query, description: createdAt ≥, schema: { type: string, format: date-time } }
+        - { name: to, in: query, description: createdAt <, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderPage' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [orders]
+      operationId: createOrder
+      summary: 登记出租订单（服务端按账号报价、熟客规则计算金额并锁定账号 listed → rented；计提号主应付）
+      description: 黑名单联系方式 → 409 RENTER_BLACKLISTED（并写操作日志）；账号非 listed → 409 ACCOUNT_NOT_AVAILABLE。金额以服务端计算为准。
+      x-roles: [cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrderCreate' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/RentalOrder' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /orders/preview:
+    post:
+      tags: [orders]
+      operationId: previewOrder
+      summary: 登记前预览：租客档案、是否拦截、熟客优惠后的金额
+      x-roles: [cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrderPreviewRequest' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderPreview' } } } }
+  /orders/{id}:
+    get:
+      tags: [orders]
+      operationId: getOrder
+      summary: 订单详情（含 events 生命周期事件与 deposits 押金台账）
+      x-roles: [cs, ops, admin]
+      x-client-unused: true
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderView' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /orders/{id}/handover:
+    post:
+      tags: [orders]
+      operationId: orderHandover
+      summary: 登记交号（active 且未交号）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /orders/{id}/extend:
+    post:
+      tags: [orders]
+      operationId: orderExtend
+      summary: 改租期（active；rentalDays ≥ 1，按新天数重算 endAt）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [rentalDays], properties: { rentalDays: { type: integer, minimum: 1 }, note: { type: string, maxLength: 500 } } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /orders/{id}/end:
+    post:
+      tags: [orders]
+      operationId: orderEnd
+      summary: 到期结束（active → settling；账号 rented → settling）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /orders/{id}/return:
+    post:
+      tags: [orders]
+      operationId: orderReturn
+      summary: 登记还号（settling 且未还号）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /orders/{id}/deposits:
+    post:
+      tags: [orders]
+      operationId: addDepositEntry
+      summary: 押金台账记一笔（collect 收取 / deduct 扣除 / refund 退还；扣除与退还不得超过余额；订单关闭后 409）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DepositEntryCreate' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /orders/{id}/owner-payments:
+    post:
+      tags: [orders]
+      operationId: payOwner
+      summary: 登记付号主款（≤ 本单号主应付余额；写 OwnerPayableEntry type=pay）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [amount], properties: { amount: { $ref: '#/components/schemas/Money' }, note: { type: string, maxLength: 500 } } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /orders/{id}/complete:
+    post:
+      tags: [orders]
+      operationId: orderComplete
+      summary: 结算完成（settling → done；押金余额与本单号主应付余额都须为 0，否则必须填 note；账号 → listed（relist）或 off）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [relist], properties: { relist: { type: boolean }, note: { type: string, maxLength: 500 } } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /orders/{id}/cancel:
+    post:
+      tags: [orders]
+      operationId: orderCancel
+      summary: 取消（仅 active 且未交号；退还押金、冲销号主应付 type=reverse；账号 → listed）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/OrderOk' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /payables:
+    get:
+      tags: [payables]
+      operationId: listPayables
+      summary: 号主应付台账流水（accrue 计提 / pay 付款 / reverse 冲销）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - { name: ownerId, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string, enum: [accrue, pay, reverse] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PayablePage' } } } }
+
+  /renters:
+    get:
+      tags: [profiles]
+      operationId: listRenters
+      summary: 租客档案（含由订单汇总的租过次数、消费、押金扣除次数）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - $ref: '#/components/parameters/q'
+        - { name: tag, in: query, schema: { $ref: '#/components/schemas/RenterTag' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RenterPage' } } } }
+    post:
+      tags: [profiles]
+      operationId: saveRenter
+      summary: 新建 / 更新租客档案（按 contact 规范化后 upsert：去首尾空格、小写；写操作日志）
+      x-roles: [cs, ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RenterUpsert' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RenterProfile' } } } }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /renters/lookup:
+    get:
+      tags: [profiles]
+      operationId: lookupRenter
+      summary: 按联系方式查档案（规范化匹配；无档案时 profile=null）
+      x-roles: [cs, ops, admin]
+      parameters: [ { name: contact, in: query, required: true, schema: { type: string } } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, required: [profile], properties: { profile: { allOf: [ { $ref: '#/components/schemas/RenterProfile' } ], nullable: true } } } } }
+  /owners:
+    get:
+      tags: [profiles]
+      operationId: listOwners
+      summary: 号主档案（寄租数、累计应付、已结、余额）
+      x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/page' }, { $ref: '#/components/parameters/pageSize' }, { $ref: '#/components/parameters/sort' }, { $ref: '#/components/parameters/q' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerPage' } } } }
+
+  /rules/pricing:
+    get:
+      tags: [rules]
+      operationId: getPricingRule
+      summary: 当前出租计价规则（含服务费率，仅员工）
+      x-roles: [cs, ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRule' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [rules]
+      operationId: savePricingRule
+      summary: 保存计价规则 → 生成新版本（version = 当前 + 1）
+      description: 请求体 rule.version 必须等于当前版本，否则 409 VERSION_CONFLICT（乐观锁）。已有账号的报价快照不自动重算。
+      x-roles: [ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRuleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingRule' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /rules/valuation:
+    get:
+      tags: [rules]
+      operationId: getValuationRule
+      summary: 当前回收估值依据（市场系数、保险格系数、参考成交价等）
+      x-roles: [ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationRule' } } } }
+    put:
+      tags: [rules]
+      operationId: saveValuationRule
+      summary: 保存估值依据 → 生成新版本（乐观锁同上）；历史回收单保留当时的估值快照
+      x-roles: [ops, admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationRuleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationRule' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /rules/versions:
+    get:
+      tags: [rules]
+      operationId: ruleVersions
+      summary: 两类规则的版本历史（新→旧）
+      x-roles: [ops, admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pricing, valuation]
+                properties:
+                  pricing: { type: array, items: { $ref: '#/components/schemas/RuleVersionMeta' } }
+                  valuation: { type: array, items: { $ref: '#/components/schemas/RuleVersionMeta' } }
+  /rules/pricing/trial:
+    post:
+      tags: [rules]
+      operationId: trialPricing
+      summary: 用未保存的规则试算（不落库；结果必须与正式算价同一实现）
+      x-roles: [ops, admin]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [input, rule], properties: { input: { $ref: '#/components/schemas/PricingInput' }, rule: { $ref: '#/components/schemas/PricingRule' } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PricingResult' } } } }
+  /rules/valuation/trial:
+    post:
+      tags: [rules]
+      operationId: trialValuation
+      summary: 用未保存的估值依据试算（不落库）
+      x-roles: [ops, admin]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [input, rule], properties: { input: { $ref: '#/components/schemas/ValuationInput' }, rule: { $ref: '#/components/schemas/ValuationRule' } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationResult' } } } }
+
+  /reports:
+    get:
+      tags: [reports]
+      operationId: report
+      summary: 经营报表 C11（区间 [from, to)；按 Asia/Shanghai 自然日计天数）
+      x-roles: [cs, ops, admin]
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: dimension, in: query, required: true, schema: { type: string, enum: [safeBox, rank, price, channel] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Report' } } } }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /dashboard:
+    get:
+      tags: [admin]
+      operationId: dashboard
+      summary: 看板统计（「今日 / 本周 / 本月」按 Asia/Shanghai）
+      x-roles: [cs, ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardStats' } } } }
+  /staff:
+    get:
+      tags: [admin]
+      operationId: listStaff
+      summary: 全部用户（含号主与成员）及启用状态
+      x-roles: [admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/StaffUser' } } } } }
+  /staff/{username}:
+    patch:
+      tags: [admin]
+      operationId: setStaffEnabled
+      summary: 启用 / 停用（停用立即吊销该用户全部令牌；不能停用自己或最后一个管理员 → 409）
+      x-roles: [admin]
+      parameters: [ { name: username, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/StaffUser' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /audit-logs:
+    get:
+      tags: [admin]
+      operationId: listAuditLogs
+      summary: 操作日志（新→旧，只增不改）
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/q'
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AuditLogPage' } } } }
+  /demo/reset:
+    post:
+      tags: [admin]
+      operationId: resetDemo
+      summary: 重置演示数据（仅 Meta.demo=true 的演示环境存在；生产环境 404）
+      x-roles: [admin]
+      responses:
+        '204': { description: 已重置 }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, description: 不透明会话令牌（≥128 位随机，服务端存哈希），有效期 12 小时滑动续期，最长 7 天 }
+
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: string } }
+    page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    pageSize: { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+    sort: { name: sort, in: query, description: '逗号分隔，`-` 前缀为降序，如 `-createdAt,accountNo`；未知字段 422', schema: { type: string } }
+    q: { name: q, in: query, description: 关键字（模糊匹配，大小写不敏感）, schema: { type: string } }
+
+  responses:
+    Unauthorized: { description: 未登录 / 令牌失效 / 用户被停用, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Forbidden: { description: 角色无权限, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    NotFound: { description: 不存在或对当前用户不可见, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Conflict: { description: 状态冲突（非法流转、重复、黑名单、版本冲突）, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Unprocessable: { description: 校验失败（fields 给出字段级错误）, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    TooLarge: { description: 请求体 / 文件过大, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    Unsupported: { description: 不支持的文件类型, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    TooMany: { description: 频率限制, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+    OrderOk: { description: OK（更新后的订单）, content: { application/json: { schema: { $ref: '#/components/schemas/RentalOrder' } } } }
+
+  schemas:
+    Money: { type: integer, minimum: 0, description: 人民币元（整数）。非整数 → 422 }
+    DateTime: { type: string, format: date-time, description: ISO 8601 带时区，例 2026-11-27T14:37:36.000Z }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: 机器可读错误码，见契约错误码表, example: VALIDATION_FAILED }
+            message: { type: string, description: 可直接展示给用户的中文说明 }
+            fields: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+            details: { type: object, additionalProperties: true }
+            requestId: { type: string }
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string, description: 'JSON 路径，如 coinAmount、asset.skins[1]、rows[3]' }
+        message: { type: string }
+
+    PageMeta:
+      type: object
+      required: [total, page, pageSize]
+      properties: { total: { type: integer }, page: { type: integer }, pageSize: { type: integer } }
+
+    Role: { type: string, enum: [owner, member, cs, ops, admin] }
+    User:
+      type: object
+      required: [username, displayName, role]
+      properties:
+        username: { type: string }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        ownerId: { type: string, description: 仅 role=owner }
+    StaffUser:
+      allOf: [ { $ref: '#/components/schemas/User' }, { type: object, required: [enabled], properties: { enabled: { type: boolean } } } ]
+    DemoAccount:
+      type: object
+      required: [username, password, role, displayName]
+      properties: { username: { type: string }, password: { type: string }, role: { $ref: '#/components/schemas/Role' }, displayName: { type: string } }
+    Meta:
+      type: object
+      required: [version, demo]
+      properties:
+        version: { type: string, description: 后端版本 }
+        demo: { type: boolean, description: 'true 时前端显示演示账号、角色切换、重置数据；生产必须为 false' }
+        demoAccounts: { type: array, items: { $ref: '#/components/schemas/DemoAccount' }, description: 仅 demo=true }
+        serverTime: { $ref: '#/components/schemas/DateTime' }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties: { username: { type: string, maxLength: 64 }, password: { type: string, maxLength: 128 } }
+    LoginResponse:
+      type: object
+      required: [token, expiresAt, user]
+      properties: { token: { type: string }, expiresAt: { $ref: '#/components/schemas/DateTime' }, user: { $ref: '#/components/schemas/User' } }
+
+    Attachment:
+      type: object
+      required: [id, name, url, uploadedBy, at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string, description: '<img src> 可用地址（见上传说明）' }
+        mime: { type: string }
+        size: { type: integer, description: 字节 }
+        uploadedBy: { type: string }
+        at: { $ref: '#/components/schemas/DateTime' }
+
+    AccountStatus:
+      type: string
+      enum: [draft, listed, rented, settling, off, held]
+      description: draft 草稿/待确认 · listed 空闲可租 · rented 租赁中 · settling 待结算 · off 已下架 · held 已回收持有
+    AccountSource: { type: string, enum: [consign, buyin], description: consign 号主寄租 · buyin 自收 }
+    DiscountMode: { type: string, enum: [system, custom] }
+    AccountFields:
+      type: object
+      description: 账号可编辑字段（与模板导入列一一对应）
+      required: [status, source, ownerContact, costAmount, region, loginMethod, channel, assistTime, banRecord, totalAssets, coinAmount, secretKd, level, rank, safeBox, stamina, load, awmCount, helmet6Count, armor6Count, experienceCardCount, skins, cycle, coinRatio, discountMode, deposit, remark]
+      properties:
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        source: { $ref: '#/components/schemas/AccountSource' }
+        ownerId: { type: string, description: 服务端根据 ownerContact 关联，客户端可不传 }
+        ownerContact: { type: string, description: consign 必填；buyin 为 “自有” }
+        costAmount: { $ref: '#/components/schemas/Money' }
+        region: { type: string, description: 字典 regions }
+        loginMethod: { type: string, description: 字典 loginMethods }
+        channel: { type: string, description: PricingRule.channelFeeRates 的键 }
+        assistTime: { type: string, example: '09:00-23:00' }
+        banRecord: { type: boolean }
+        totalAssets: { type: number, description: M，≥ coinAmount }
+        coinAmount: { type: number, exclusiveMinimum: true, minimum: 0, description: 纯币 M }
+        secretKd: { type: number }
+        level: { type: integer, minimum: 1, maximum: 200 }
+        rank: { type: string }
+        safeBox: { type: integer, enum: [2, 4, 6, 9] }
+        stamina: { type: string, example: 5级 }
+        load: { type: string, example: 5级 }
+        awmCount: { type: integer, minimum: 0 }
+        helmet6Count: { type: integer, minimum: 0 }
+        armor6Count: { type: integer, minimum: 0 }
+        experienceCardCount: { type: integer, minimum: 0 }
+        skins: { type: array, items: { type: string }, description: 字典皮肤名 }
+        cycle: { type: string, description: PricingRule.cycleValues 的键 }
+        coinRatio: { type: number, exclusiveMinimum: true, minimum: 0, description: 1:N 的 N（W/元） }
+        discountMode: { $ref: '#/components/schemas/DiscountMode' }
+        customDiscountPercent: { type: number, minimum: 1, maximum: 100, description: discountMode=custom 时必填，且在 customDiscountMin–Max 内 }
+        deposit: { $ref: '#/components/schemas/Money' }
+        remark: { type: string, maxLength: 500 }
+    AccountWrite:
+      allOf:
+        - { $ref: '#/components/schemas/AccountFields' }
+        - type: object
+          properties:
+            attachmentIds: { type: array, maxItems: 5, items: { type: string }, description: '省略 = 不变；新上传的 id 或本账号已有截图 id' }
+    Account:
+      allOf:
+        - { $ref: '#/components/schemas/AccountFields' }
+        - type: object
+          required: [id, accountNo, attachments, quote, createdAt, updatedAt]
+          properties:
+            id: { type: string }
+            accountNo: { type: string, description: '服务端生成 DF+序号；导入可指定，全局唯一（含已删除），大小写不敏感' }
+            formerOwnerId: { type: string }
+            attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
+            quote: { $ref: '#/components/schemas/PricingResult' }
+            createdAt: { $ref: '#/components/schemas/DateTime' }
+            updatedAt: { $ref: '#/components/schemas/DateTime' }
+    AccountAdminView:
+      allOf:
+        - { $ref: '#/components/schemas/Account' }
+        - type: object
+          required: [cumulativeIncome, paybackPercent]
+          properties:
+            cumulativeIncome: { $ref: '#/components/schemas/Money' }
+            paybackPercent: { type: number, nullable: true, description: '仅 buyin 且 costAmount>0：累计平台收入 / 成本 × 100（两位小数）' }
+            ownerName: { type: string }
+    AccountAdminPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/AccountAdminView' } } } } ]
+    LobbyQuote:
+      type: object
+      description: 租客应付部分（member 可见）。员工额外可见 serviceFeeRate / serviceFee / ownerSettlement
+      properties:
+        ruleVersion: { type: integer }
+        usedRatio: { type: number }
+        tierHit: { type: string, nullable: true }
+        discountPercent: { type: number }
+        originalCoinRent: { $ref: '#/components/schemas/Money' }
+        coinRent: { $ref: '#/components/schemas/Money' }
+        extraFee: { $ref: '#/components/schemas/Money' }
+        renterRent: { $ref: '#/components/schemas/Money' }
+        deposit: { $ref: '#/components/schemas/Money' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        rentalDays: { type: integer }
+        serviceFeeRate: { type: number, description: 仅员工 }
+        serviceFee: { type: integer, description: 仅员工 }
+        ownerSettlement: { type: integer, description: 仅员工 }
+    LobbyAccount:
+      type: object
+      description: |
+        Account 去掉 quote/ownerContact/ownerId/formerOwnerId/costAmount，再按角色加回：
+        owner → quote=null，且不含 deposit/coinRatio/discountMode/customDiscountPercent（任何租价参数都不给号主）；
+        member → quote 为 LobbyQuote 子集；员工 → 完整 quote + ownerContact/ownerId/costAmount。
+      required: [id, accountNo, status, source, region, loginMethod, channel, coinAmount, totalAssets, rank, safeBox, skins, cycle, attachments, quote]
+      properties:
+        id: { type: string }
+        accountNo: { type: string }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+        source: { $ref: '#/components/schemas/AccountSource' }
+        region: { type: string }
+        loginMethod: { type: string }
+        channel: { type: string }
+        assistTime: { type: string }
+        banRecord: { type: boolean }
+        totalAssets: { type: number }
+        coinAmount: { type: number }
+        secretKd: { type: number }
+        level: { type: integer }
+        rank: { type: string }
+        safeBox: { type: integer }
+        stamina: { type: string }
+        load: { type: string }
+        awmCount: { type: integer }
+        helmet6Count: { type: integer }
+        armor6Count: { type: integer }
+        experienceCardCount: { type: integer }
+        skins: { type: array, items: { type: string } }
+        cycle: { type: string }
+        coinRatio: { type: number, description: owner 不返回 }
+        discountMode: { $ref: '#/components/schemas/DiscountMode' }
+        customDiscountPercent: { type: number, description: owner 不返回 }
+        deposit: { type: integer, minimum: 0, description: owner 不返回 }
+        remark: { type: string }
+        attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
+        quote: { allOf: [ { $ref: '#/components/schemas/LobbyQuote' } ], nullable: true }
+        ownerContact: { type: string, description: 仅员工 }
+        ownerId: { type: string, description: 仅员工 }
+        costAmount: { type: integer, description: 仅员工 }
+        createdAt: { $ref: '#/components/schemas/DateTime' }
+        updatedAt: { $ref: '#/components/schemas/DateTime' }
+    LobbyAccountPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/LobbyAccount' } } } } ]
+
+    PricingInput:
+      type: object
+      required: [coinAmount, totalAssets, coinRatio, channel, discountMode, cycle, deposit]
+      properties:
+        coinAmount: { type: number }
+        totalAssets: { type: number }
+        coinRatio: { type: number }
+        channel: { type: string }
+        discountMode: { $ref: '#/components/schemas/DiscountMode' }
+        customDiscountPercent: { type: number }
+        cycle: { type: string }
+        deposit: { $ref: '#/components/schemas/Money' }
+        renterContact: { type: string, description: 可选；为熟客时自动带入熟客优惠 }
+        renterRegular: { type: boolean, description: 服务端忽略客户端传值 }
+    PricingResult:
+      type: object
+      description: 'PRD 7.1，逐步取整到元。参考实现 src/domain/pricing.ts'
+      required: [ruleVersion, usedRatio, tierHit, discountPercent, originalCoinRent, coinRent, serviceFeeRate, serviceFee, ownerSettlement, extraFee, renterRent, deposit, totalAmount, rentalDays, regularDiscountApplied, depositWaived]
+      properties:
+        ruleVersion: { type: integer }
+        usedRatio: { type: number }
+        tierHit: { type: string, nullable: true }
+        discountPercent: { type: number }
+        originalCoinRent: { $ref: '#/components/schemas/Money' }
+        coinRent: { $ref: '#/components/schemas/Money' }
+        serviceFeeRate: { type: number, description: '%' }
+        serviceFee: { $ref: '#/components/schemas/Money' }
+        ownerSettlement: { $ref: '#/components/schemas/Money' }
+        extraFee: { $ref: '#/components/schemas/Money' }
+        renterRent: { $ref: '#/components/schemas/Money' }
+        deposit: { $ref: '#/components/schemas/Money' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        rentalDays: { type: integer }
+        regularDiscountApplied: { type: boolean }
+        depositWaived: { type: boolean }
+    PricingResultPartial:
+      type: object
+      description: 按角色裁剪后的 PricingResult（owner 只有 ruleVersion + ownerSettlement）
+      properties:
+        ruleVersion: { type: integer }
+        usedRatio: { type: number }
+        tierHit: { type: string, nullable: true }
+        discountPercent: { type: number }
+        originalCoinRent: { type: integer }
+        coinRent: { type: integer }
+        serviceFeeRate: { type: number }
+        serviceFee: { type: integer }
+        ownerSettlement: { type: integer }
+        extraFee: { type: integer }
+        renterRent: { type: integer }
+        deposit: { type: integer }
+        totalAmount: { type: integer }
+        rentalDays: { type: integer }
+        regularDiscountApplied: { type: boolean }
+        depositWaived: { type: boolean }
+    PricingOptions:
+      type: object
+      required: [version, channels, cycles, customDiscountMin, customDiscountMax, defaultDeposit]
+      properties:
+        version: { type: integer }
+        channels: { type: array, items: { type: string } }
+        cycles: { type: array, items: { type: string } }
+        customDiscountMin: { type: number }
+        customDiscountMax: { type: number }
+        defaultDeposit: { $ref: '#/components/schemas/Money' }
+
+    ValuationInput:
+      type: object
+      required: [contact, region, loginMethod, coinAmount, totalAssets, level, rank, safeBox, skins, banRecord, awmCount, helmet6Count, armor6Count, experienceCardCount]
+      properties:
+        contact: { type: string }
+        region: { type: string }
+        loginMethod: { type: string }
+        coinAmount: { type: number }
+        totalAssets: { type: number }
+        level: { type: integer }
+        rank: { type: string }
+        safeBox: { type: integer }
+        skins: { type: array, items: { type: string } }
+        banRecord: { type: boolean }
+        awmCount: { type: integer }
+        helmet6Count: { type: integer }
+        armor6Count: { type: integer }
+        experienceCardCount: { type: integer }
+        remark: { type: string }
+    DealReference:
+      type: object
+      required: [id, title, assetSummary, coinAmount, safeBox, dealPrice, dealAt, enabled, sort]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        assetSummary: { type: string }
+        coinAmount: { type: number }
+        safeBox: { type: integer }
+        dealPrice: { $ref: '#/components/schemas/Money' }
+        dealAt: { type: string, format: date, description: YYYY-MM-DD（Asia/Shanghai） }
+        enabled: { type: boolean }
+        sort: { type: integer }
+    ValuationResult:
+      type: object
+      description: '中心价 = (纯币价 + 皮肤价 + 附加) × 封禁系数 × 保险格系数 × 回收折扣 × 市场系数；references 只展示、不改中心价。参考实现 src/domain/valuation.ts'
+      required: [ruleVersion, rejected, coinValue, skinValue, extraValue, banFactor, safeBoxFactor, buyDiscount, marketCoefficient, references, center, min, max, lines]
+      properties:
+        ruleVersion: { type: integer }
+        rejected: { type: boolean }
+        coinValue: { $ref: '#/components/schemas/Money' }
+        skinValue: { $ref: '#/components/schemas/Money' }
+        extraValue: { $ref: '#/components/schemas/Money' }
+        banFactor: { type: number }
+        safeBoxFactor: { type: number }
+        buyDiscount: { type: number }
+        marketCoefficient: { type: number }
+        references: { type: array, items: { $ref: '#/components/schemas/DealReference' } }
+        center: { $ref: '#/components/schemas/Money' }
+        min: { $ref: '#/components/schemas/Money' }
+        max: { $ref: '#/components/schemas/Money' }
+        lines: { type: array, items: { type: object, required: [label, value], properties: { label: { type: string }, value: { type: number } } } }
+
+    RecycleStatus:
+      type: string
+      enum: [submitted, following, quoted, deal, rejected, cancelled]
+      description: 'submitted→following/cancelled；following→quoted/rejected/cancelled；quoted→quoted(改价)/deal/rejected；deal、rejected、cancelled 为终态'
+    RecycleCreate:
+      type: object
+      required: [asset]
+      properties: { asset: { $ref: '#/components/schemas/ValuationInput' }, sourceAccountId: { type: string } }
+    RecycleTransition:
+      type: object
+      required: [toStatus]
+      properties:
+        toStatus: { $ref: '#/components/schemas/RecycleStatus' }
+        note: { type: string, maxLength: 500 }
+        staffPrice: { $ref: '#/components/schemas/Money' }
+    RecycleRequest:
+      type: object
+      required: [id, requestNo, submitter, contact, asset, result, status, events, createdAt]
+      properties:
+        id: { type: string }
+        requestNo: { type: string, example: HS00005 }
+        submitter: { type: string }
+        ownerId: { type: string }
+        sourceAccountId: { type: string }
+        contact: { type: string }
+        asset: { $ref: '#/components/schemas/ValuationInput' }
+        result: { $ref: '#/components/schemas/ValuationResult' }
+        staffPrice: { $ref: '#/components/schemas/Money' }
+        status: { $ref: '#/components/schemas/RecycleStatus' }
+        relatedAccountId: { type: string }
+        events:
+          type: array
+          items:
+            type: object
+            required: [at, operator, fromStatus, toStatus, note]
+            properties:
+              at: { $ref: '#/components/schemas/DateTime' }
+              operator: { type: string }
+              fromStatus: { allOf: [ { $ref: '#/components/schemas/RecycleStatus' } ], nullable: true }
+              toStatus: { $ref: '#/components/schemas/RecycleStatus' }
+              price: { type: integer }
+              note: { type: string }
+        createdAt: { $ref: '#/components/schemas/DateTime' }
+    RecyclePage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/RecycleRequest' } } } } ]
+
+    OwnerStatus: { type: string, enum: [待确认, 空闲, 出租中, 已下架, 已回收] }
+    OwnerAccountView:
+      type: object
+      description: 白名单。绝不包含 renterContact、订单、coinRent/totalAmount 等租金、serviceFee/serviceFeeRate、platform income、costAmount。
+      required: [id, accountNo, ownerStatus, expireAt, takeHome, recycle, region, loginMethod, assistTime, coinAmount, totalAssets, level, rank, safeBox, secretKd, skins, banRecord, awmCount, helmet6Count, armor6Count, experienceCardCount, attachments, createdAt]
+      properties:
+        id: { type: string }
+        accountNo: { type: string }
+        ownerStatus: { $ref: '#/components/schemas/OwnerStatus' }
+        expireAt: { allOf: [ { $ref: '#/components/schemas/DateTime' } ], nullable: true, description: 出租中时的到期时间 }
+        takeHome: { type: integer, nullable: true, description: 寄租每租期到手（元）= quote.ownerSettlement；已转回收为 null }
+        recycle:
+          type: object
+          nullable: true
+          required: [requestNo, status, min, max, rejected, staffPrice]
+          properties:
+            requestNo: { type: string }
+            status: { $ref: '#/components/schemas/RecycleStatus' }
+            min: { type: integer }
+            max: { type: integer }
+            rejected: { type: boolean }
+            staffPrice: { type: integer, nullable: true }
+        region: { type: string }
+        loginMethod: { type: string }
+        assistTime: { type: string }
+        coinAmount: { type: number }
+        totalAssets: { type: number }
+        level: { type: integer }
+        rank: { type: string }
+        safeBox: { type: integer }
+        secretKd: { type: number }
+        skins: { type: array, items: { type: string } }
+        banRecord: { type: boolean }
+        awmCount: { type: integer }
+        helmet6Count: { type: integer }
+        armor6Count: { type: integer }
+        experienceCardCount: { type: integer }
+        attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
+        ownerName: { type: string, description: 仅 admin 查看全部时 }
+        createdAt: { $ref: '#/components/schemas/DateTime' }
+    OwnerAccountPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/OwnerAccountView' } } } } ]
+    OwnerEstimate:
+      type: object
+      required: [takeHome, ruleVersion]
+      properties: { takeHome: { $ref: '#/components/schemas/Money' }, ruleVersion: { type: integer } }
+    OwnerListingCreate:
+      type: object
+      required: [asset, assistTime, remark]
+      properties:
+        asset: { $ref: '#/components/schemas/ValuationInput' }
+        assistTime: { type: string }
+        remark: { type: string, maxLength: 500 }
+        fromRecycleId: { type: string }
+        attachmentIds: { type: array, maxItems: 5, items: { type: string } }
+
+    OrderStatus: { type: string, enum: [active, settling, done, cancelled], description: 'active→settling(end)/cancelled(cancel，未交号)；settling→done(complete)' }
+    OrderStep: { type: string, enum: [register, handover, expire, return, settle, refund, deduct, collect, extend, cancel, payOwner] }
+    OrderEvent:
+      type: object
+      required: [step, note, at, operator]
+      properties: { step: { $ref: '#/components/schemas/OrderStep' }, note: { type: string }, at: { $ref: '#/components/schemas/DateTime' }, operator: { type: string } }
+    DepositEntry:
+      type: object
+      required: [type, amount, reason, at, operator]
+      properties:
+        type: { type: string, enum: [collect, deduct, refund] }
+        amount: { $ref: '#/components/schemas/Money' }
+        reason: { type: string }
+        at: { $ref: '#/components/schemas/DateTime' }
+        operator: { type: string }
+    DepositEntryCreate:
+      type: object
+      required: [type, amount, reason]
+      properties:
+        type: { type: string, enum: [collect, deduct, refund] }
+        amount: { type: integer, minimum: 1 }
+        reason: { type: string, maxLength: 200 }
+    RentalOrder:
+      type: object
+      required: [id, orderNo, accountId, accountNo, renterContact, startAt, endAt, rentalDays, coinRent, extraFee, deposit, totalAmount, ownerPayable, regularApplied, handedOver, returned, status, remark, deposits, events, createdBy, createdAt]
+      properties:
+        id: { type: string }
+        orderNo: { type: string, example: ZD00023 }
+        accountId: { type: string }
+        accountNo: { type: string }
+        renterContact: { type: string }
+        startAt: { $ref: '#/components/schemas/DateTime' }
+        endAt: { $ref: '#/components/schemas/DateTime' }
+        rentalDays: { type: integer }
+        coinRent: { $ref: '#/components/schemas/Money' }
+        extraFee: { $ref: '#/components/schemas/Money' }
+        deposit: { $ref: '#/components/schemas/Money' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        ownerPayable: { $ref: '#/components/schemas/Money' }
+        regularApplied: { type: boolean }
+        handedOver: { type: boolean }
+        returned: { type: boolean }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        remark: { type: string }
+        deposits: { type: array, items: { $ref: '#/components/schemas/DepositEntry' } }
+        events: { type: array, items: { $ref: '#/components/schemas/OrderEvent' } }
+        createdBy: { type: string }
+        createdAt: { $ref: '#/components/schemas/DateTime' }
+    OrderView:
+      allOf:
+        - { $ref: '#/components/schemas/RentalOrder' }
+        - type: object
+          required: [reminder, ownerPayableBalance]
+          properties:
+            reminder: { type: string, enum: [expiring, overdue], nullable: true, description: 'active 且 endAt − now ≤ expiryRemindHours → expiring；已过 endAt → overdue' }
+            ownerPayableBalance: { $ref: '#/components/schemas/Money' }
+    OrderPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/OrderView' } } } } ]
+    OrderCreate:
+      type: object
+      required: [accountId, renterContact, startAt, rentalDays, deposit, extraFee, remark]
+      properties:
+        accountId: { type: string }
+        renterContact: { type: string, minLength: 1 }
+        startAt: { $ref: '#/components/schemas/DateTime' }
+        rentalDays: { type: integer, minimum: 1 }
+        deposit: { $ref: '#/components/schemas/Money' }
+        extraFee: { $ref: '#/components/schemas/Money' }
+        remark: { type: string, maxLength: 500 }
+    OrderPreviewRequest:
+      type: object
+      required: [accountId, renterContact]
+      properties: { accountId: { type: string }, renterContact: { type: string } }
+    OrderPreview:
+      type: object
+      required: [profile, blocked, coinRent, extraFee, deposit, ownerPayable, rentalDays, regularApplied, depositWaived]
+      properties:
+        profile: { allOf: [ { $ref: '#/components/schemas/RenterProfile' } ], nullable: true }
+        blocked: { type: boolean }
+        coinRent: { type: integer }
+        extraFee: { type: integer }
+        deposit: { type: integer }
+        ownerPayable: { type: integer }
+        rentalDays: { type: integer }
+        regularApplied: { type: boolean }
+        depositWaived: { type: boolean }
+    NoteBody:
+      type: object
+      properties: { note: { type: string, maxLength: 500 } }
+
+    OwnerPayableEntry:
+      type: object
+      required: [id, ownerId, accountId, accountNo, type, amount, note, at, operator]
+      properties:
+        id: { type: string }
+        ownerId: { type: string }
+        accountId: { type: string }
+        accountNo: { type: string }
+        orderId: { type: string }
+        orderNo: { type: string }
+        type: { type: string, enum: [accrue, pay, reverse] }
+        amount: { $ref: '#/components/schemas/Money' }
+        note: { type: string }
+        at: { $ref: '#/components/schemas/DateTime' }
+        operator: { type: string }
+    PayablePage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/OwnerPayableEntry' } } } } ]
+
+    RenterTag: { type: string, enum: [regular, caution, blacklist], description: 'regular 熟客（自动折扣 / 免押）· caution 慎租（提示）· blacklist 黑名单（禁止登记）' }
+    RenterProfile:
+      type: object
+      required: [contact, displayName, tag, note, rentalCount, totalSpend, depositDeductCount, lastRentAt]
+      properties:
+        contact: { type: string }
+        displayName: { type: string }
+        tag: { allOf: [ { $ref: '#/components/schemas/RenterTag' } ], nullable: true }
+        note: { type: string }
+        rentalCount: { type: integer }
+        totalSpend: { $ref: '#/components/schemas/Money' }
+        depositDeductCount: { type: integer }
+        lastRentAt: { allOf: [ { $ref: '#/components/schemas/DateTime' } ], nullable: true }
+    RenterPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/RenterProfile' } } } } ]
+    RenterUpsert:
+      type: object
+      required: [contact, displayName, tag, note]
+      properties:
+        contact: { type: string, minLength: 1, maxLength: 64 }
+        displayName: { type: string, maxLength: 64 }
+        tag: { allOf: [ { $ref: '#/components/schemas/RenterTag' } ], nullable: true }
+        note: { type: string, maxLength: 500 }
+    OwnerProfile:
+      type: object
+      required: [id, contact, displayName, consignedCount, cumulativeSettlement, accrued, balance]
+      properties:
+        id: { type: string }
+        contact: { type: string }
+        displayName: { type: string }
+        userId: { type: string }
+        consignedCount: { type: integer }
+        cumulativeSettlement: { $ref: '#/components/schemas/Money' }
+        accrued: { $ref: '#/components/schemas/Money' }
+        balance: { type: integer, description: 应付 − 已结 − 冲销 }
+    OwnerPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/OwnerProfile' } } } } ]
+
+    DiscountTier:
+      type: object
+      required: [threshold, ratioPlus, discount]
+      properties: { threshold: { type: number }, ratioPlus: { type: number }, discount: { type: number } }
+    PricingRule:
+      type: object
+      description: 见 src/config/rules.ts（defaultPricingRule 为初始值）
+      required: [version, channelFeeRates, triggerMetric, discountTiers, customDiscountMin, customDiscountMax, dayCalcMode, cycleValues, extraFee, defaultDeposit, regularDiscountPercent, regularMode, regularWaiveDeposit, ownerDefaults, expiryRemindHours]
+      properties:
+        version: { type: integer }
+        channelFeeRates: { type: object, additionalProperties: { type: number }, description: '渠道 → 服务费率 %' }
+        triggerMetric: { type: string, enum: [coinAmount, totalAssets] }
+        discountTiers: { type: array, items: { $ref: '#/components/schemas/DiscountTier' } }
+        customDiscountMin: { type: number }
+        customDiscountMax: { type: number }
+        dayCalcMode: { type: string, enum: [byCycleRate, fixedDays] }
+        cycleValues: { type: object, additionalProperties: { type: number } }
+        extraFee: { type: object, required: [mode, value], properties: { mode: { type: string, enum: [fixed, percent] }, value: { type: number } } }
+        defaultDeposit: { $ref: '#/components/schemas/Money' }
+        regularDiscountPercent: { type: number }
+        regularMode: { type: string, enum: [best, multiply] }
+        regularWaiveDeposit: { type: boolean }
+        ownerDefaults: { type: object, required: [coinRatio, channel, cycle], properties: { coinRatio: { type: number }, channel: { type: string }, cycle: { type: string } } }
+        expiryRemindHours: { type: number }
+    ValuationRule:
+      type: object
+      required: [version, buyRatio, buyDiscount, banFactor, rejectIfBanned, floatDown, floatUp, skinCategoryPrices, skinPrices, extraItemPrices, rankPrices, safeBoxFactors, marketCoefficient, dealReferences]
+      properties:
+        version: { type: integer }
+        buyRatio: { type: number }
+        buyDiscount: { type: number }
+        banFactor: { type: number }
+        rejectIfBanned: { type: boolean }
+        floatDown: { type: number }
+        floatUp: { type: number }
+        skinCategoryPrices: { type: object, additionalProperties: { type: number } }
+        skinPrices: { type: object, additionalProperties: { type: number } }
+        extraItemPrices: { type: object, required: [awm, helmet6, armor6, experienceCard], properties: { awm: { type: number }, helmet6: { type: number }, armor6: { type: number }, experienceCard: { type: number } } }
+        rankPrices: { type: object, additionalProperties: { type: number } }
+        safeBoxFactors: { type: object, additionalProperties: { type: number } }
+        marketCoefficient: { type: number }
+        dealReferences: { type: array, items: { $ref: '#/components/schemas/DealReference' } }
+    PricingRuleSave:
+      type: object
+      required: [rule]
+      properties: { rule: { $ref: '#/components/schemas/PricingRule' }, summary: { type: string, maxLength: 200 } }
+    ValuationRuleSave:
+      type: object
+      required: [rule]
+      properties: { rule: { $ref: '#/components/schemas/ValuationRule' }, summary: { type: string, maxLength: 200 } }
+    RuleVersionMeta:
+      type: object
+      required: [version, savedAt, savedBy, summary]
+      properties: { version: { type: integer }, savedAt: { $ref: '#/components/schemas/DateTime' }, savedBy: { type: string }, summary: { type: string } }
+
+    ImportContext:
+      type: object
+      required: [regions, loginMethods, channels, cycles, ranks, safeBoxes, stamina, loads, skins, existingNos]
+      properties:
+        regions: { type: array, items: { type: string } }
+        loginMethods: { type: array, items: { type: string } }
+        channels: { type: array, items: { type: string } }
+        cycles: { type: array, items: { type: string } }
+        ranks: { type: array, items: { type: string } }
+        safeBoxes: { type: array, items: { type: integer } }
+        stamina: { type: array, items: { type: string } }
+        loads: { type: array, items: { type: string } }
+        skins: { type: array, items: { type: string } }
+        existingNos: { type: array, items: { type: string }, description: 已占用编号（含已删除） }
+    ImportRequest:
+      type: object
+      required: [fileName, rows]
+      properties:
+        fileName: { type: string, maxLength: 200 }
+        rows: { type: array, maxItems: 501, items: { type: array, items: { nullable: true, oneOf: [ { type: string }, { type: number }, { type: boolean } ] } } }
+        dryRun: { type: boolean, default: false }
+    ImportRowResult:
+      type: object
+      required: [rowNo, accountNo, errors]
+      properties:
+        rowNo: { type: integer, description: Excel 行号（表头为第 1 行） }
+        accountNo: { type: string }
+        errors: { type: array, items: { type: string } }
+    ImportPreview:
+      type: object
+      required: [headerErrors, rows, valid, invalid]
+      properties:
+        headerErrors: { type: array, items: { type: string } }
+        rows: { type: array, items: { $ref: '#/components/schemas/ImportRowResult' } }
+        valid: { type: integer }
+        invalid: { type: integer }
+    ImportOutcome:
+      type: object
+      required: [imported, skipped, operator]
+      properties:
+        imported: { type: array, items: { type: string }, description: 入库的账号编号（status=draft） }
+        skipped: { type: array, items: { $ref: '#/components/schemas/ImportRowResult' } }
+        operator: { type: string }
+
+    Report:
+      type: object
+      required: [from, to, days, utilization, gross, net, dailyNetPerAccount, orderCount, accountCount, groups, accounts, payback]
+      properties:
+        from: { $ref: '#/components/schemas/DateTime' }
+        to: { $ref: '#/components/schemas/DateTime' }
+        days: { type: number }
+        utilization: { type: number, description: '%' }
+        gross: { $ref: '#/components/schemas/Money' }
+        net: { type: integer, description: 平台收入 = 租金 + 附加费 − 号主应付 }
+        dailyNetPerAccount: { type: number }
+        orderCount: { type: integer }
+        accountCount: { type: integer }
+        groups:
+          type: array
+          items:
+            type: object
+            required: [key, accounts, orders, rentedDays, accountDays, utilization, gross, net]
+            properties: { key: { type: string }, accounts: { type: integer }, orders: { type: integer }, rentedDays: { type: number }, accountDays: { type: number }, utilization: { type: number }, gross: { type: integer }, net: { type: integer } }
+        accounts:
+          type: array
+          items:
+            type: object
+            required: [id, accountNo, source, orders, rentedDays, utilization, gross, net, dailyNet]
+            properties: { id: { type: string }, accountNo: { type: string }, source: { $ref: '#/components/schemas/AccountSource' }, orders: { type: integer }, rentedDays: { type: number }, utilization: { type: number }, gross: { type: integer }, net: { type: integer }, dailyNet: { type: number } }
+        payback:
+          type: array
+          items:
+            type: object
+            required: [id, accountNo, cost, income, percent, daysHeld, estPaybackDays, paidBack]
+            properties: { id: { type: string }, accountNo: { type: string }, cost: { type: integer }, income: { type: integer }, percent: { type: number }, daysHeld: { type: number }, estPaybackDays: { type: number, nullable: true }, paidBack: { type: boolean } }
+    DashboardStats:
+      type: object
+      required: [listed, rented, settling, held, todayOrders, weekOrders, pendingRecycles, depositBalance, expiringOrders, ownerPayableBalance, revenueTotal, revenueMonth]
+      properties:
+        listed: { type: integer }
+        rented: { type: integer }
+        settling: { type: integer }
+        held: { type: integer }
+        todayOrders: { type: integer }
+        weekOrders: { type: integer }
+        pendingRecycles: { type: integer }
+        depositBalance: { $ref: '#/components/schemas/Money' }
+        expiringOrders: { type: integer }
+        ownerPayableBalance: { $ref: '#/components/schemas/Money' }
+        revenueTotal: { $ref: '#/components/schemas/Money' }
+        revenueMonth: { $ref: '#/components/schemas/Money' }
+    CsAgent:
+      type: object
+      required: [id, name, wechat, isFallback, schedule]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        wechat: { type: string }
+        isFallback: { type: boolean }
+        schedule:
+          type: array
+          items:
+            type: object
+            required: [weekdays, start, end]
+            properties: { weekdays: { type: array, items: { type: integer, minimum: 0, maximum: 6 } }, start: { type: string, example: '09:00' }, end: { type: string, example: '18:00' } }
+    AuditLog:
+      type: object
+      required: [at, actor, action, summary]
+      properties: { at: { $ref: '#/components/schemas/DateTime' }, actor: { type: string }, action: { type: string }, summary: { type: string } }
+    AuditLogPage:
+      allOf: [ { $ref: '#/components/schemas/PageMeta' }, { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/AuditLog' } } } } ]

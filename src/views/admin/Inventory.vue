@@ -88,8 +88,13 @@
         <el-col :span="12"><el-form-item label="备注"><el-input v-model="form.remark" /></el-form-item></el-col>
       </el-row>
     </el-form>
-    <div v-if="form.attachments?.length" style="margin-top:8px"><span class="muted">资产截图：</span>
-      <el-image v-for="x in form.attachments" :key="x.id" :src="x.dataUrl" :preview-src-list="form.attachments.map((y) => y.dataUrl)" style="width:80px;height:60px;margin-right:6px" fit="cover" /></div>
+    <div style="margin-top:8px" class="acc-shots">
+      <div class="muted" style="margin-bottom:4px">资产截图（最多 5 张，单张 ≤1MB；导入的账号在这里补传）</div>
+      <el-upload action="#" list-type="picture-card" :auto-upload="false" accept="image/png,image/jpeg,image/webp" :limit="5" v-model:file-list="shotFiles"
+        :disabled="!editable" :on-exceed="() => ElMessage.warning('最多 5 张')" :on-preview="(f: any) => { shots = [f.url]; shotDlg = true }">
+        <el-icon v-if="editable"><Plus /></el-icon>
+      </el-upload>
+    </div>
     <template #footer><el-button @click="dlg = false">{{ editable ? '取消' : '关闭' }}</el-button><el-button v-if="editable" type="primary" @click="save">保存（按当前规则生成报价）</el-button></template>
   </el-dialog>
   <ImportDialog v-if="editable" v-model="importDlg" @imported="onImported" />
@@ -108,6 +113,9 @@ import { parsePricingText } from '../../domain/parsePricingText'
 import { ACCOUNT_SOURCE_LABEL, ACCOUNT_STATUS_LABEL, type AccountAdminView as Account, type AccountInput, type AccountSource, type AccountStatus } from '../../domain/types'
 import { can } from '../../domain/permissions'
 import { fmtTime, run, statusTagType } from '../../utils'
+import type { UploadUserFile } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
+import type { Attachment, NewAttachment } from '../../domain/types'
 import ImportDialog from './ImportDialog.vue'
 
 const route = useRoute()
@@ -141,11 +149,24 @@ const req = (m: string) => [{ required: true, message: m, trigger: 'change' }]
 const rules = { ownerContact: [{ validator: (_: any, v: string, cb: any) => (form.source === 'buyin' || v?.trim() ? cb() : cb(new Error('请填写号主联系方式'))), trigger: 'change' }], region: req('必填'), loginMethod: req('必填'), channel: req('必填'), cycle: req('必填'), coinRatio: req('必填'),
   coinAmount: [{ validator: (_: any, v: number, cb: any) => (v > 0 ? cb() : cb(new Error('纯币需大于 0'))), trigger: 'change' }] }
 
-function openNew() { Object.keys(form).forEach((k) => delete (form as any)[k]); Object.assign(form, blank()); pasteText.value = ''; dlg.value = true }
+const shotFiles = ref<(UploadUserFile & { att?: Attachment })[]>([])
+const toDataUrl = (f: File) => new Promise<string>((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = bad; r.readAsDataURL(f) })
+async function collectShots(): Promise<(Attachment | NewAttachment)[]> {
+  const out: (Attachment | NewAttachment)[] = []
+  for (const f of shotFiles.value) {
+    if (f.att) { out.push(f.att); continue }
+    if (!f.raw) continue
+    if (f.raw.size > 1024 * 1024) throw new Error(`「${f.name}」超过 1MB`)
+    out.push({ name: f.name, dataUrl: await toDataUrl(f.raw) })
+  }
+  return out
+}
+function openNew() { Object.keys(form).forEach((k) => delete (form as any)[k]); Object.assign(form, blank()); pasteText.value = ''; shotFiles.value = []; dlg.value = true }
 function openEdit(a: Account) {
   Object.keys(form).forEach((k) => delete (form as any)[k])
   const { accountNo, quote, createdAt, updatedAt, deleted, cumulativeIncome, paybackPercent, ownerName, ...rest } = JSON.parse(JSON.stringify(a))
   Object.assign(form, rest)
+  shotFiles.value = (a.attachments ?? []).map((x) => ({ name: x.name, url: x.dataUrl, uid: Date.now() + Math.random(), status: 'success', att: x }))
   editingNo.value = accountNo
   dlg.value = true
 }
@@ -157,7 +178,9 @@ function applyPaste() {
 }
 async function save() {
   if (!(await formRef.value?.validate().catch(() => false))) return
-  const input = JSON.parse(JSON.stringify(form))
+  let attachments: (Attachment | NewAttachment)[]
+  try { attachments = await collectShots() } catch (e: any) { return ElMessage.error(e.message) }
+  const input = { ...JSON.parse(JSON.stringify(form)), attachments }
   if (input.discountMode !== 'custom') delete input.customDiscountPercent
   if (input.source === 'buyin') { input.ownerContact = input.ownerContact || '自有'; delete input.ownerId } else input.costAmount = 0
   const r = await run(() => api.saveAccount(input), '已保存')
