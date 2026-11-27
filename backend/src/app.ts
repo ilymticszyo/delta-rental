@@ -694,6 +694,33 @@ app.get('/api/staff', wrap(async (req, res) => {
   const u = requireRoles(req, ['admin'])
   res.json(await readDb((db) => engine.listUsers(db, u)))
 }))
+app.post('/api/staff', wrap(async (req, res) => {
+  const u = requireRoles(req, ['admin'])
+  const password = String(req.body?.password ?? '')
+  if (password.length < 8 || password.length > 128) {
+    throw new ApiError('数据校验未通过', 422, false, 'VALIDATION_FAILED', [{ field: 'password', message: '密码须为 8–128 位' }])
+  }
+  const passwordHash = await bcrypt.hash(password, 8)
+  const staff = await writeDb((db) => engine.createStaff(db, u, {
+    username: String(req.body?.username ?? ''),
+    displayName: String(req.body?.displayName ?? ''),
+    role: req.body?.role,
+    passwordHash,
+    ownerId: req.body?.ownerId,
+  }))
+  res.status(201).json(staff)
+}))
+app.post('/api/staff/:username/password', wrap(async (req, res) => {
+  const u = requireRoles(req, ['admin'])
+  const password = String(req.body?.password ?? '')
+  if (password.length < 8 || password.length > 128) {
+    throw new ApiError('数据校验未通过', 422, false, 'VALIDATION_FAILED', [{ field: 'password', message: '密码须为 8–128 位' }])
+  }
+  const passwordHash = await bcrypt.hash(password, 8)
+  const stored = await writeDb((db) => engine.resetPassword(db, u, req.params.username, passwordHash))
+  await revokeUser(stored)
+  res.status(204).end()
+}))
 app.patch('/api/staff/:username', wrap(async (req, res) => {
   const u = requireRoles(req, ['admin'])
   const username = req.params.username

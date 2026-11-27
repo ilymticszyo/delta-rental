@@ -234,8 +234,8 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 |---|---|---|---|---|
 | GET | /dicts | `getDicts` | 所有登录角色都要字典（大区、段位、皮肤…）；第 12 节第 6 条说走 `/accounts/import/context`，但它只对 ops / admin 开放，客服、号主、会员拿不到 | ops / admin 退回 `import/context`，其他角色用前端内置字典 |
 | GET | /uploads/{id} | `refreshAttachment` | 1 小时签名过期后只重签一张图，不必重拉整个资源 | 重新拉取所在资源 |
-| POST | /staff | `createUser` | 第 12 节第 5 条：管理员在员工管理里新建号主登录并选号主档案（1:1）。**后端已就是否新增该接口询问用户，待确认** | 员工页“新建用户”表单显示“后端暂未支持新建用户”，创建按钮禁用 |
-| POST | /staff/{username}/password | （无界面入口） | 重置密码并吊销旧令牌 | 无 |
+| POST | /staff | `createUser` | 管理员新建用户。`role=owner` 必须带尚未绑定的 `ownerId`（1:1）。密码 8–128 位 | 员工页“新建用户” |
+| POST | /staff/{username}/password | （无界面入口） | 仅管理员重置密码并吊销该用户全部令牌。不提供自助改密 | 无 |
 | 字段 | `RentalOrder.ruleVersion`、`OrderPreview.ruleVersion` | | 订单记录按哪版规则计价 | 不显示“计价规则”一行 |
 | 字段 | `Attachment.expiresAt` | | 到期前主动续签 | 图片加载失败时再续 |
 | 参数 | `GET /payables?orderId=` | `listPayables` | 订单详情只拉本单台账 | 前端本地过滤 |
@@ -254,7 +254,7 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 2. **截图**：存在本机磁盘（compose 卷 `uploads`）。`url` 为 HMAC 签名地址 `/api/uploads/{id}/content?exp=&sig=`，有效期 1 小时，列表接口每次重签。`<img>` 不带 Authorization。号主只能把**自己上传且未绑定**的 id，或该账号已有的 id，绑到自己的号。
 3. **分页**：首版就做服务端分页。`page` / `pageSize`（默认 50，最大 200，超出按 200）。前端可以继续用 `pageSize=200` 翻页拉全量。
 4. **改规则不自动重算**已有库存报价。每条报价快照保留自己的 `ruleVersion`。不提供批量重算接口（留给以后单独做）。
-5. **号主登录**：用户行带 `ownerId`，与号主档案 1:1（种子里 owner1↔ow1、owner2↔ow2）。`GET /staff` 返回该字段。契约目前只有启用 / 停用，没有新建用户或重置密码的操作，因此首版不另加接口；要做新建需先补 openapi。
+5. **号主登录**：用户行带 `ownerId`，与号主档案 1:1（种子里 owner1↔ow1、owner2↔ow2）。管理员用 `POST /staff` 新建登录并绑定档案，用 `POST /staff/{username}/password` 重置密码（立即吊销旧令牌）。这两个接口只对管理员开放，没有自助改密。密码 8–128 位，bcrypt 存储。
 6. **字典与客服排班**：只读。字典走 `GET /accounts/import/context` 与 `GET /pricing/options`，排班走 `GET /cs-agents`。管理接口以后再加。
 7. **幂等**：`POST /orders`、`POST /accounts/import`、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`。同一用户、同一路径、同一请求体在 24 小时内重放当时的响应；同一把钥匙配不同请求体 → 409 `DUPLICATE`。
 8. **租金与租期（产品已确认，沿用演示 / PRD 第 7 章）**：租金按纯币和比例计算，**天数不参与金额**。默认天数 = `max(1, floor(纯币 M / 周期字典的 M/天))`；固定天数模式下周期值就是天数。租客应付 = 折后租金 + 附加服务费（默认 0）；总金额 = 应付 + 押金。号主到手 = 折后租金 − 折后租金 × 渠道费率。登记订单时租期、押金、附加费由客服填写（默认带出账号报价，可改）；`coinRent` / `ownerPayable` 由服务端按账号报价锁定。改租期只改 `endAt`，不重算租金。熟客折扣与系统档取更优（`regularMode=best`，可配置为叠乘），熟客免押时押金强制为 0。

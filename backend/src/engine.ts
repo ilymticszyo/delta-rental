@@ -8,7 +8,7 @@ import { calcValuation, validateValuationInput } from './domain/valuation'
 import { lobbyAccountFor, pricingFor, toOwnerView } from './domain/visibility'
 import type {
   Account, AccountAdminView, AccountInput, AccountStatus, Attachment, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep,
-  OwnerPayableEntry, PricingInput, RecycleRequest, RecycleStatus, RentalOrder, RenterTag, User, ValuationInput,
+  OwnerPayableEntry, PricingInput, RecycleRequest, RecycleStatus, RentalOrder, RenterTag, Role, User, ValuationInput,
 } from './domain/types'
 import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL } from './domain/types'
 import { toPricingInput, type Db, type DbUser } from './domain/seedData'
@@ -755,6 +755,39 @@ export class Engine {
   listUsers(db: Db, user: User | null) {
     this.need(user, 'staff')
     return db.users.map((u) => ({ ...toPublicUser(u), enabled: u.enabled }))
+  }
+  createStaff(db: Db, user: User | null, input: { username: string; displayName: string; role: Role; passwordHash: string; ownerId?: string }) {
+    const me = this.need(user, 'staff')
+    const username = input.username.trim()
+    const displayName = input.displayName.trim()
+    const ownerId = input.ownerId?.trim() || undefined
+    const fields: { field: string; message: string }[] = []
+    if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) fields.push({ field: 'username', message: '用户名为 3–32 位字母、数字、点、下划线或连字符' })
+    if (!displayName || displayName.length > 64) fields.push({ field: 'displayName', message: '显示名须为 1–64 个字符' })
+    if (!['owner', 'member', 'cs', 'ops', 'admin'].includes(input.role)) fields.push({ field: 'role', message: '角色无效' })
+    if (input.role === 'owner' && !ownerId) fields.push({ field: 'ownerId', message: '号主用户必须绑定号主档案' })
+    if (input.role !== 'owner' && ownerId) fields.push({ field: 'ownerId', message: '非号主用户不能绑定号主档案' })
+    if (fields.length) throw new ApiError('数据校验未通过', 422, false, 'VALIDATION_FAILED', fields)
+    if (db.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) throw new ApiError('用户名已存在', 409, false, 'DUPLICATE')
+    if (ownerId) {
+      const owner = db.owners.find((o) => o.id === ownerId)
+      if (!owner) throw new ApiError('号主档案不存在', 422, false, 'VALIDATION_FAILED', [{ field: 'ownerId', message: '号主档案不存在' }])
+      if (owner.userId || db.users.some((u) => u.ownerId === ownerId)) throw new ApiError('该号主档案已绑定其他用户', 409, false, 'OWNER_ALREADY_BOUND')
+      owner.userId = username
+    }
+    const created = { username, password: input.passwordHash, displayName, role: input.role, enabled: true, ...(ownerId ? { ownerId } : {}) }
+    db.users.push(created)
+    this.audit(db, me, '新建用户', `${username}（${input.role}）${ownerId ? ' 绑定 ' + ownerId : ''}`)
+    return { ...toPublicUser(created), enabled: true }
+  }
+  /** 返回库存里的用户名，供调用方吊销该用户的全部令牌。 */
+  resetPassword(db: Db, user: User | null, username: string, passwordHash: string) {
+    const me = this.need(user, 'staff')
+    const u = db.users.find((x) => x.username.toLowerCase() === username.trim().toLowerCase())
+    if (!u) throw new ApiError('用户不存在', 404, false, 'NOT_FOUND')
+    u.password = passwordHash
+    this.audit(db, me, '重置密码', u.username)
+    return u.username
   }
   setUserEnabled(db: Db, user: User | null, username: string, enabled: boolean) {
     const me = this.need(user, 'staff')

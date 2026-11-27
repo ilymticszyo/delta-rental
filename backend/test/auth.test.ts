@@ -267,6 +267,27 @@ describe('导入', () => {
   })
 })
 
+describe('员工账号', () => {
+  it('管理员新建号主登录并一对一绑定；重复用户名与重复绑定被拒绝；重置密码不写入日志明文', () => {
+    const { db, eng, as } = setup()
+    const admin = as('admin')
+    const owner = db.owners.find((o) => !o.userId)!
+    const created = eng.createStaff(db, admin, { username: 'NewOwner', displayName: '新号主', role: 'owner', passwordHash: 'hashed', ownerId: owner.id })
+    assert.equal(created.ownerId, owner.id)
+    assert.equal(created.enabled, true)
+    assert.equal('password' in created, false)
+    assert.equal(owner.userId, 'NewOwner')
+    assert.throws(() => eng.createStaff(db, admin, { username: 'newowner', displayName: 'x', role: 'cs', passwordHash: 'h' }), (e: unknown) => e instanceof ApiError && e.errorCode === 'DUPLICATE')
+    assert.throws(() => eng.createStaff(db, admin, { username: 'Other', displayName: 'x', role: 'owner', passwordHash: 'h', ownerId: owner.id }), (e: unknown) => e instanceof ApiError && e.errorCode === 'OWNER_ALREADY_BOUND')
+    assert.throws(() => eng.createStaff(db, admin, { username: 'NoLink', displayName: 'x', role: 'owner', passwordHash: 'h' }), (e: unknown) => e instanceof ApiError && e.code === 422)
+    const name = eng.resetPassword(db, admin, 'newowner', 'hashed-2')
+    assert.equal(name, 'NewOwner')
+    assert.equal(db.users.find((u) => u.username === 'NewOwner')?.password, 'hashed-2')
+    assert.ok(db.audit.some((a) => a.action === '新建用户' && !a.summary.includes('hashed')))
+    assert.ok(db.audit.some((a) => a.action === '重置密码' && a.summary === 'NewOwner'))
+  })
+})
+
 describe('种子规模', () => {
   it('20 个账号、5 个号主，到期提醒命中种子里的临期单', () => {
     const { db, eng, as } = setup()

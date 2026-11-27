@@ -2,6 +2,10 @@
 
 > 已过时。请只看仓库根目录的 `docs/api-contract.md` 与 `docs/openapi.yaml`。下面是接入契约之前的旧草稿。
 
+## 密码（与契约一致）
+
+`POST /api/staff` 和 `POST /api/staff/{username}/password` 的密码为 **8–128 个字符**，不再加额外复杂度规则。用 bcrypt（cost 8）存储，响应和操作日志都不含密码或哈希。只有管理员可以新建用户和重置密码；用户不能在这两个接口上改自己的密码。重置后该用户的全部登录令牌立即作废。
+
 前端 `src/api/types.ts` 里的每个 `Api` 方法对应一个 HTTP 接口。成功时响应 JSON 就是该方法的返回值（`void` 返回 `{ "ok": true }`，`undefined` / 找不到返回 `null`）。
 
 错误：
