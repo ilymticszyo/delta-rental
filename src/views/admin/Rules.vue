@@ -146,7 +146,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../../api'
-import { dicts, type PricingRule, type RuleVersionMeta, type ValuationRule } from '../../config/rules'
+import type { PricingRule, RuleVersionMeta, ValuationRule } from '../../config/rules'
+import { dicts } from '../../config/dictStore'
 import type { PricingResult, ValuationResult } from '../../domain/types'
 import { fmtTime, run } from '../../utils'
 const tab = ref('pricing')

@@ -50,8 +50,9 @@
       <el-form-item label="备注"><el-input v-model="nf.remark" /></el-form-item>
       <el-form-item label="应收合计"><span class="money">¥{{ (pv?.coinRent ?? 0) + nf.extraFee + (pv?.depositWaived ? 0 : nf.deposit) }}</span>
         <span class="muted" style="margin-left:8px">租金 {{ pv?.coinRent ?? '-' }}{{ pv?.regularApplied ? '（熟客价）' : '' }} · 号主应付 {{ pv?.ownerPayable ?? '-' }}</span></el-form-item>
+      <el-form-item v-if="pv && pv.ruleVersion != null" label="计价规则"><span class="muted">v{{ pv.ruleVersion }}<template v-if="curRuleVersion && pv.ruleVersion < curRuleVersion">（按账号上架时的规则计价；当前规则 v{{ curRuleVersion }}）</template></span></el-form-item>
     </el-form>
-    <template #footer><el-button @click="dlgNew = false">取消</el-button><el-button type="primary" :disabled="pv?.blocked" @click="create">登记并锁定账号</el-button></template>
+    <template #footer><el-button @click="dlgNew = false">取消</el-button><el-button type="primary" :disabled="pv?.blocked" :loading="creating" @click="create">登记并锁定账号</el-button></template>
   </el-dialog>
 
   <el-drawer v-model="drawer" :title="`订单 ${cur?.orderNo}`" size="640px">
@@ -66,6 +67,8 @@
         <el-descriptions-item label="总金额">{{ cur.totalAmount }}</el-descriptions-item>
         <el-descriptions-item label="押金余额">{{ depositBalance(cur) }}（收 {{ cur.deposit }}）</el-descriptions-item>
         <el-descriptions-item label="号主应付 / 未付">{{ cur.ownerPayable }} / {{ cur.ownerPayableBalance }}</el-descriptions-item>
+        <el-descriptions-item label="计价规则">{{ cur.ruleVersion != null ? `v${cur.ruleVersion}` : '—' }}</el-descriptions-item>
+        <el-descriptions-item label="登记">{{ cur.createdBy }} · {{ fmtTime(cur.createdAt) }}</el-descriptions-item>
       </el-descriptions>
 
       <div class="row-gap" style="margin:12px 0">
@@ -106,7 +109,7 @@
       <div v-if="cur.ownerPayableBalance > 0 && cur.status !== 'cancelled'" class="row-gap" style="margin-top:8px">
         <el-input-number v-model="pay.amount" :min="1" :max="cur.ownerPayableBalance" size="small" />
         <el-input v-model="pay.note" size="small" placeholder="如 微信转账" style="width:180px" />
-        <el-button size="small" type="primary" @click="payOwner">登记付号主款</el-button>
+        <el-button size="small" type="primary" :loading="paying" @click="payOwner">登记付号主款</el-button>
       </div>
 
       <h4>生命周期留痕</h4>
@@ -135,6 +138,7 @@ import { ElMessage } from 'element-plus'
 import { api, depositBalance, type OrderPreview, type OrderView } from '../../api'
 import { ORDER_STATUS_LABEL, ORDER_STEP_LABEL, RENTER_TAG_LABEL, type AccountAdminView, type OrderStatus, type OwnerPayableEntry } from '../../domain/types'
 import { fmtTime, run, statusTagType } from '../../utils'
+import { createSubmitKey } from '../../api/idempotency'
 
 const route = useRoute()
 const list = ref<OrderView[]>([])
@@ -160,8 +164,14 @@ async function refreshPreview() {
   if (first && a) { nf.rentalDays = pv.value.rentalDays; nf.deposit = a.deposit; nf.extraFee = pv.value.extraFee }
   if (pv.value.depositWaived) nf.deposit = 0
 }
+// 每张“登记订单”表单一个 Idempotency-Key：超时 / 断网后再点、或双击，都只登记一次
+const createKey = createSubmitKey()
+const creating = ref(false)
+const curRuleVersion = ref<number | null>(null)
 async function openNew(accountId = '') {
+  createKey.reset()
   listed.value = (await api.listAccounts()).filter((a) => a.status === 'listed')
+  api.pricingOptions().then((p) => { curRuleVersion.value = p.version }).catch(() => {})
   Object.assign(nf, { accountId, renterContact: '', startAt: new Date().toISOString(), rentalDays: 1, deposit: 0, extraFee: 0, remark: '' })
   pv.value = null
   await refreshPreview()
@@ -169,7 +179,10 @@ async function openNew(accountId = '') {
 }
 async function create() {
   if (!nf.accountId) return ElMessage.warning('请选择账号')
-  const r = await run(() => api.createOrder({ ...nf, startAt: new Date(nf.startAt || Date.now()).toISOString() }), '登记成功，账号已锁定为租赁中')
+  const input = { ...nf, startAt: new Date(nf.startAt || Date.now()).toISOString() }
+  creating.value = true
+  const r = await run(() => createKey.submit(input, (idempotencyKey) => api.createOrder(input, { idempotencyKey })), '登记成功，账号已锁定为租赁中')
+  creating.value = false
   if (r) { dlgNew.value = false; await load() }
 }
 
@@ -179,18 +192,32 @@ const payables = ref<OwnerPayableEntry[]>([])
 const extendDays = ref(1)
 const dep = reactive({ type: 'deduct' as 'collect' | 'deduct' | 'refund', amount: 1, reason: '' })
 const pay = reactive({ amount: 1, note: '' })
-async function open(o: OrderView) {
-  cur.value = o
-  extendDays.value = o.rentalDays
-  Object.assign(dep, { type: o.deposits.length ? 'deduct' : 'collect', amount: Math.max(1, depositBalance(o)), reason: '' })
-  Object.assign(pay, { amount: Math.max(1, o.ownerPayableBalance), note: '' })
-  payables.value = (await api.listPayables()).filter((p) => p.orderId === o.id)
+/** 详情抽屉：用 GET /orders/{id} 取最新数据（列表可能是旧的），号主应付流水按订单过滤 */
+async function open(o: Pick<OrderView, 'id'>) {
+  const [fresh, ps] = await Promise.all([api.getOrder(o.id), api.listPayables({ orderId: o.id })])
+  const mine = ps.filter((p) => p.orderId === o.id) // orderId 过滤是提议参数，后端忽略时这里兜底
+  if (cur.value?.id !== fresh.id) payKey.reset()
+  cur.value = fresh
+  extendDays.value = fresh.rentalDays
+  Object.assign(dep, { type: fresh.deposits.length ? 'deduct' : 'collect', amount: Math.max(1, depositBalance(fresh)), reason: '' })
+  Object.assign(pay, { amount: Math.max(1, fresh.ownerPayableBalance), note: '' })
+  payables.value = mine
+  const i = list.value.findIndex((x) => x.id === fresh.id)
+  if (i >= 0) list.value[i] = fresh
   drawer.value = true
 }
-async function reloadCur() { await load(); const id = cur.value?.id; const o = list.value.find((x) => x.id === id); if (o) await open(o) }
+async function reloadCur() { const id = cur.value?.id; if (id) await open({ id }); void load() }
 async function act(fn: () => Promise<unknown>, msg: string) { if (await run(fn, msg)) await reloadCur() }
 const addDep = () => act(() => api.addDepositEntry(cur.value!.id, { ...dep }), '已记录')
-const payOwner = () => act(() => api.payOwner(cur.value!.id, pay.amount, pay.note), '已登记付款')
+// 付号主款同样带 Idempotency-Key：同一笔（同订单、同金额、同说明）重试不会付两次
+const payKey = createSubmitKey()
+const paying = ref(false)
+async function payOwner() {
+  const body = { orderId: cur.value!.id, amount: pay.amount, note: pay.note }
+  paying.value = true
+  try { await act(() => payKey.submit(body, (idempotencyKey) => api.payOwner(body.orderId, body.amount, body.note, { idempotencyKey })), '已登记付款') }
+  finally { paying.value = false }
+}
 const dlgDone = ref(false)
 const relist = ref(true)
 const doneNote = ref('')
@@ -201,7 +228,7 @@ async function load() { list.value = await api.listOrders() }
 onMounted(async () => {
   await load()
   if (route.query.new) openNew(route.query.new as string)
-  if (route.query.open) { const o = list.value.find((x) => x.id === route.query.open); if (o) open(o) }
+  if (route.query.open) await run(() => open({ id: String(route.query.open) }))
 })
 </script>
 <style>.remind-row td { background: #fff7ed !important; }</style>

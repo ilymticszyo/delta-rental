@@ -25,7 +25,8 @@ export interface Db {
   recycles: RecycleRequest[]
   pricingRule: PricingRule
   valuationRule: ValuationRule
-  pricingHistory: RuleVersionMeta[]
+  /** rule：该版本的计价规则快照（订单按账号报价所记版本计价）；v0.2 的本地数据可能没有 */
+  pricingHistory: (RuleVersionMeta & { rule?: PricingRule })[]
   valuationHistory: (RuleVersionMeta & { rule: ValuationRule })[]
   csAgents: CsAgent[]
   audit: AuditLog[]
@@ -142,7 +143,7 @@ export function buildSeedDb(nowMs = Date.now()): Db {
     csAgents: JSON.parse(JSON.stringify(demoCsAgents)), audit: [],
   }
   const t0 = iso(nowMs - 40 * DAY)
-  db.pricingHistory.push({ version: 1, savedAt: t0, savedBy: 'system', summary: '初始规则（PRD 示例值）' })
+  db.pricingHistory.push({ version: 1, savedAt: t0, savedBy: 'system', summary: '初始规则（PRD 示例值）', rule: JSON.parse(JSON.stringify(db.pricingRule)) })
   db.valuationHistory.push({ version: 1, savedAt: t0, savedBy: 'system', summary: '初始估值依据（市场系数 1.00）', rule: JSON.parse(JSON.stringify(db.valuationRule)) })
 
   seedAccounts().forEach((input, i) => {
@@ -162,7 +163,7 @@ export function buildSeedDb(nowMs = Date.now()): Db {
     const o: RentalOrder = {
       id: `o${db.seq.order}`, orderNo: `ZD${String(db.seq.order).padStart(5, '0')}`, accountId: acc.id, accountNo: acc.accountNo,
       renterContact: renter, startAt, endAt, rentalDays: days, coinRent: q.coinRent, extraFee: q.extraFee, deposit: q.deposit,
-      totalAmount: q.coinRent + q.extraFee + q.deposit, ownerPayable: acc.source === 'consign' ? q.ownerSettlement : 0, regularApplied: regular,
+      totalAmount: q.coinRent + q.extraFee + q.deposit, ownerPayable: acc.source === 'consign' ? q.ownerSettlement : 0, ruleVersion: q.ruleVersion, regularApplied: regular,
       handedOver: true, returned: status === 'done', status, remark: '演示数据', deposits: [], createdBy: op, createdAt: startAt,
       events: [{ step: 'register', note: `登记 ${days} 天`, at: startAt, operator: op }, { step: 'handover', note: '已交号', at: iso(startMs + 600000), operator: op }],
     }

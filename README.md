@@ -50,6 +50,25 @@ npx vite preview --port 4173 &
 node scripts/smoke.mjs http://localhost:4173/ shots   # 端到端点击测试（Playwright + 系统 Chrome）
 ```
 
+### 对真实后端跑契约测试
+
+默认 `npm run test:contract` 会在进程内起一个内存假后端。设了 `CONTRACT_BASE_URL`，就不起假后端，直接请求该地址（自动补 `/api`）：
+
+```bash
+cd backend && cp .env.example .env && docker compose up -d --build && cd ..   # 后端仓库 / 分支里的启动方式
+CONTRACT_BASE_URL=http://127.0.0.1:3000 npm run test:contract
+```
+
+| 变量 | 作用 |
+|---|---|
+| `CONTRACT_BASE_URL` | 后端地址，如 `http://127.0.0.1:3000` |
+| `CONTRACT_ADMIN_USER` / `CONTRACT_ADMIN_PASSWORD` | 管理员账号，默认 `admin` / `admin123` |
+| `CONTRACT_ALLOW_RESET=1` | 允许调用 `/demo/reset`（会清空数据），默认跳过 |
+
+- 用例通过 API 自建数据（编号、联系方式带随机后缀），可重复跑。**会写入测试数据，请指向开发库，不要指向生产。**
+- 依赖演示账号（owner1、cs 等）或提议接口（`x-status: proposed`）的用例，条件不满足时跳过并打印原因；提议字段缺失只作提示，不算失败。
+- 没有 Docker 时，可以用假后端模拟外部服务：`PORT=8091 npm run fake-api &` 再 `CONTRACT_BASE_URL=http://127.0.0.1:8091 npm run test:contract`。假后端加 `FAKE_PROPOSED=0 FAKE_ADMIN_ONLY=1 FAKE_DEMO=0` 时，表现接近尚未实现提议项、也没有演示账号的后端。
+
 环境变量见 `.env.example`。服务器部署（1Panel / OpenResty / Docker / HTTPS）见 [`deploy/README.md`](deploy/README.md)。
 
 ## 已知不足

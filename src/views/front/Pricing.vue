@@ -74,7 +74,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance } from 'element-plus'
 import { api } from '../../api'
-import { dicts } from '../../config/rules'
+import { dicts } from '../../config/dictStore'
 import type { PricingOptions } from '../../api/types'
 import { pricingToText } from '../../domain/pricing'
 import type { PricingResult } from '../../domain/types'

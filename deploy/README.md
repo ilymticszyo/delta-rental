@@ -126,6 +126,7 @@ curl -s http://127.0.0.1:8088/api/meta     # 经容器转发到后端
 ## 发版检查清单
 
 1. `npm test`（单测 + 契约测试全部通过）
+   - 后端上线前，再对开发环境的后端跑一遍：`CONTRACT_BASE_URL=http://<后端>:3000 npm run test:contract`。后端用 `cd backend && cp .env.example .env && docker compose up -d --build` 启动。用例会写测试数据，只能指向开发库；变量说明见根目录 README「对真实后端跑契约测试」。
 2. `npm run build:prod`
 3. 上传 `dist/`（方案 A），或 `docker build` 后重启容器（方案 B）
 4. `curl -I` 确认 index.html 是 `no-cache`，assets 是 `immutable`
@@ -137,4 +138,5 @@ curl -s http://127.0.0.1:8088/api/meta     # 经容器转发到后端
 npm run fake-api                              # 契约里的假后端，端口 8080（FAKE_DEMO=0 关闭演示数据）
 npm run dev:http                              # http 模式开发服务器，/api 代理到 VITE_API_PROXY（默认 http://localhost:8080）
 VITE_API_PROXY=http://192.168.1.10:8080 npm run dev:http   # 代理到真实后端
+CONTRACT_BASE_URL=http://127.0.0.1:3000 npm run test:contract   # 契约测试打到真实后端（不起内存假后端）
 ```

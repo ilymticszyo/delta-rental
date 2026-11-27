@@ -47,7 +47,8 @@ export interface PricingResult {
 }
 
 /** 资产截图。dataUrl = 前端用于 <img src> 的地址：mock 下是 data URL；http 下由客户端把服务端返回的 url 映射过来 */
-export interface Attachment { id: string; name: string; dataUrl: string; uploadedBy: string; at: string; mime?: string; size?: number }
+/** dataUrl：显示地址（mock 为 data URL；http 模式为服务端签名 URL，expiresAt 后需经 refreshAttachment 重新签发） */
+export interface Attachment { id: string; name: string; dataUrl: string; uploadedBy: string; at: string; mime?: string; size?: number; expiresAt?: string }
 /** 尚未上传的新截图（前端选择文件后、保存前） */
 export interface NewAttachment { name: string; dataUrl: string }
 
@@ -258,6 +259,8 @@ export interface RentalOrder {
   deposit: number
   totalAmount: number
   ownerPayable: number // 本单号主应付（自收号为 0）
+  /** 计价规则版本 = 登记时账号报价快照的 quote.ruleVersion（v0.2 之前的本地数据可能缺省） */
+  ruleVersion?: number
   regularApplied: boolean
   handedOver: boolean
   returned: boolean
@@ -283,6 +286,8 @@ export type Role = 'owner' | 'member' | 'cs' | 'ops' | 'admin'
 export const ROLE_LABEL: Record<Role, string> = { owner: '号主', member: '内部成员', cs: '客服', ops: '运营', admin: '管理员' }
 export interface User { username: string; displayName: string; role: Role; ownerId?: string }
 export interface StaffUser extends User { enabled: boolean }
+/** 管理员新建用户；role=owner 时必须带 ownerId（一对一绑定号主档案） */
+export interface StaffCreateInput { username: string; displayName: string; role: Role; password: string; ownerId?: string }
 
 export type RenterTag = 'regular' | 'caution' | 'blacklist'
 export const RENTER_TAG_LABEL: Record<RenterTag, string> = { regular: '熟客', caution: '慎租', blacklist: '黑名单' }

@@ -37,9 +37,7 @@
           </el-descriptions>
         </el-card>
         <el-card shadow="never" header="资产截图" style="margin-top:12px">
-          <el-image v-for="x in a.attachments" :key="x.id" :src="x.dataUrl" :preview-src-list="a.attachments.map((y) => y.dataUrl)" fit="cover"
-            style="width:120px;height:90px;margin:0 8px 8px 0;border-radius:6px" />
-          <span v-if="!a.attachments.length" class="muted">未上传截图</span>
+          <AttachmentGallery :attachments="a.attachments" :width="120" :height="90" empty-text="未上传截图" @expired="reload" />
         </el-card>
       </el-col>
     </el-row>
@@ -53,6 +51,7 @@ import { api } from '../../api'
 import { RECYCLE_STATUS_LABEL, type OwnerAccountView } from '../../domain/types'
 import { fmtTime } from '../../utils'
 import { ownerStatusType } from './ownerUi'
+import AttachmentGallery from '../../components/AttachmentGallery.vue'
 const route = useRoute()
 const isOwner = api.currentUser()?.role === 'owner'
 const a = ref<OwnerAccountView>()
@@ -60,5 +59,6 @@ const err = ref('')
 const openRecycle = computed(() => !!a.value?.recycle && ['submitted', 'following', 'quoted'].includes(a.value.recycle.status))
 const canTransfer = computed(() => isOwner && a.value && a.value.ownerStatus !== '已回收' && !openRecycle.value)
 const transferHint = computed(() => (openRecycle.value ? '该账号已有进行中的回收申请' : a.value?.ownerStatus === '已回收' ? '该账号已回收' : ''))
-onMounted(async () => { try { a.value = await api.ownerAccount(route.params.id as string) } catch (e: any) { err.value = e.message } })
+async function reload() { try { a.value = await api.ownerAccount(route.params.id as string) } catch (e: any) { err.value = e.message } }
+onMounted(reload)
 </script>

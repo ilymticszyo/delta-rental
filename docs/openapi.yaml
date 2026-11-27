@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: 三角洲行动 · 账号租赁与回收估值 API
-  version: 0.3.0-draft
+  version: 0.3.1-draft
   description: |
     前端（Vue，src/api/http.ts）与后端之间的契约。人类可读说明见 docs/api-contract.md，两者冲突时以本文件为准并修正另一份。
 
@@ -11,6 +11,9 @@ info:
     - 时间：ISO 8601 且带时区（服务端输出 UTC `Z`，如 `2026-11-27T14:37:36.000Z`）；纯日期 `YYYY-MM-DD` 按 Asia/Shanghai。
     - 列表：`page`（从 1 开始）、`pageSize`（默认 50，最大 200）、`sort`（`字段` 升序 / `-字段` 降序，逗号分隔）、`q` 关键字及各资源过滤参数；响应 `{items,total,page,pageSize}`。
     - 错误：`{ "error": { "code", "message", "fields"?, "details"?, "requestId"? } }`。
+    - 幂等：`POST /orders`、`POST /accounts/import`（dryRun=false）、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`（服务端保留 24 小时）。同键同请求体 → 重放首次响应（同状态码与响应体，带 `Idempotent-Replayed: true`）；同键不同请求体 → 409 `DUPLICATE`。
+    - `x-status: proposed`：前端提议、后端尚未确认 / 实现的操作、参数或字段。客户端对其缺失做了降级（404 / 501 → 提示“后端暂未支持”或回退），契约测试的“每个操作都被用到”检查不包含它们。
+    - 号主应付台账（/payables）与操作日志（/audit-logs）的 `sort` 接受 `createdAt` 作为 `at` 的别名。
     - 每个操作的 `x-roles` 列出允许的角色（owner 号主 / member 内部成员 / cs 客服 / ops 运营 / admin 管理员）；不在列表中的已登录角色返回 403。
     - 服务端是权限、字段裁剪、算价 / 估值、导入校验与状态流转的唯一权威；客户端算出的任何金额只作预览，服务端忽略并重算。
 servers:
@@ -143,6 +146,20 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ValuationResult' } } } }
         '422': { $ref: '#/components/responses/Unprocessable' }
+  /dicts:
+    get:
+      tags: [lobby]
+      operationId: getDicts
+      x-status: proposed
+      summary: 选项字典（大区、上号方式、段位、保险格、体力、负重、皮肤及分类）；只读，由服务端配置种子提供
+      description: |
+        【提议，后端未实现】后端目前的口径是字典走 GET /accounts/import/context + GET /pricing/options，但 import/context 只对 ops / admin 开放，
+        号主上架、前台筛选、算价页（owner / member / cs）拿不到字典，所以提议这个所有登录角色可读的只读接口。
+        前端降级：404 / 501 时，ops / admin 用 import/context（皮肤分类沿用内置字典），其他角色用内置字典。
+        渠道与租赁周期来自计价规则，见 GET /pricing/options。客服排班只读：GET /cs-agents、GET /cs-agents/current。
+      x-roles: [owner, member, cs, ops, admin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Dicts' } } } }
   /cs-agents:
     get:
       tags: [lobby]
@@ -359,11 +376,14 @@ paths:
         rows 为前端用 SheetJS 读出的二维数组，第 0 行是表头（列名见模板，允许带 * 与全角括号），数组下标 + 1 = Excel 行号。
         dryRun=true 时只返回逐行校验结果、不入库（响应 ImportPreview）。整份文件级错误（缺列、空文件、>500 行）→ 422 IMPORT_INVALID_FILE。
         校验规则以 src/domain/importAccounts.ts 为参考实现，tests/import.test.ts 的用例必须同样成立。
+        Idempotency-Key 只对 dryRun=false 生效（dryRun=true 不落库，忽略该头）。
       x-roles: [ops, admin]
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ImportRequest' } } } }
       responses:
         '200':
           description: OK（dryRun=false → ImportOutcome；dryRun=true → ImportPreview）
+          headers: { Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' } }
           content: { application/json: { schema: { oneOf: [ { $ref: '#/components/schemas/ImportOutcome' }, { $ref: '#/components/schemas/ImportPreview' } ] } } }
         '403': { $ref: '#/components/responses/Forbidden' }
         '413': { $ref: '#/components/responses/TooLarge' }
@@ -376,7 +396,7 @@ paths:
       summary: 上传资产截图（multipart/form-data，字段名 file）
       description: |
         仅 image/png、image/jpeg、image/webp，≤ 1 MB（以服务端嗅探的真实类型为准）。返回的 id 在 24 小时内绑定到账号（AccountWrite.attachmentIds / OwnerListingCreate.attachmentIds），
-        否则清理。url 是可直接放进 <img src> 的地址（因为 <img> 不会带 Authorization 头，url 须为带签名与过期时间的地址，或同域受 Cookie 保护的地址，见契约「上传」）。
+        否则清理。url 是可直接放进 <img src> 的签名地址（<img> 不会带 Authorization 头），有效期 1 小时，过期时间见 expiresAt；过期后用 GET /uploads/{id} 重新签发。
       x-roles: [owner, ops, admin]
       requestBody:
         required: true
@@ -388,6 +408,20 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '415': { $ref: '#/components/responses/Unsupported' }
+  /uploads/{id}:
+    get:
+      tags: [uploads]
+      operationId: getUpload
+      x-status: proposed
+      summary: 重新签发截图地址（url 过期后前端调用；返回新的 url 与 expiresAt）
+      description: |
+        【提议，后端未实现】可见性与引用它的资源一致：上传者本人；已绑定账号的截图对能看到该账号截图的角色可见（号主仅限自己的账号）。不可见 → 404。
+        前端降级：404 / 501 时重新拉取引用该截图的资源（列表 / 详情接口每次都会重签 url）。
+      x-roles: [owner, cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Attachment' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /orders:
     get:
@@ -412,11 +446,18 @@ paths:
       tags: [orders]
       operationId: createOrder
       summary: 登记出租订单（服务端按账号报价、熟客规则计算金额并锁定账号 listed → rented；计提号主应付）
-      description: 黑名单联系方式 → 409 RENTER_BLACKLISTED（并写操作日志）；账号非 listed → 409 ACCOUNT_NOT_AVAILABLE。金额以服务端计算为准。
+      description: |
+        黑名单联系方式 → 409 RENTER_BLACKLISTED（并写操作日志）；账号非 listed → 409 ACCOUNT_NOT_AVAILABLE。金额以服务端计算为准：
+        租金与号主应付按账号报价快照所记录的计价规则版本（`account.quote.ruleVersion`）计算，改规则不影响已上架账号的价格；订单记录 `ruleVersion`。
+        支持 Idempotency-Key（见下）。
       x-roles: [cs, ops, admin]
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrderCreate' } } } }
       responses:
-        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/RentalOrder' } } } }
+        '201':
+          description: Created（重放时同样是 201 + 首次的响应体）
+          headers: { Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/RentalOrder' } } }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
   /orders/preview:
@@ -432,9 +473,8 @@ paths:
     get:
       tags: [orders]
       operationId: getOrder
-      summary: 订单详情（含 events 生命周期事件与 deposits 押金台账）
+      summary: 订单详情（含 events 生命周期事件与 deposits 押金台账；前端打开详情抽屉与每次操作后用它刷新）
       x-roles: [cs, ops, admin]
-      x-client-unused: true
       parameters: [ { $ref: '#/components/parameters/id' } ]
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderView' } } } }
@@ -503,13 +543,17 @@ paths:
       tags: [orders]
       operationId: payOwner
       summary: 登记付号主款（≤ 本单号主应付余额；写 OwnerPayableEntry type=pay）
+      description: 支持 Idempotency-Key（重放时带 Idempotent-Replayed 头）。
       x-roles: [cs, ops, admin]
-      parameters: [ { $ref: '#/components/parameters/id' } ]
+      parameters: [ { $ref: '#/components/parameters/id' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [amount], properties: { amount: { $ref: '#/components/schemas/Money' }, note: { type: string, maxLength: 500 } } } } }
       responses:
-        '200': { $ref: '#/components/responses/OrderOk' }
+        '200':
+          description: 更新后的订单
+          headers: { Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/RentalOrder' } } }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
   /orders/{id}/complete:
@@ -546,8 +590,9 @@ paths:
       parameters:
         - $ref: '#/components/parameters/page'
         - $ref: '#/components/parameters/pageSize'
-        - $ref: '#/components/parameters/sort'
+        - { name: sort, in: query, description: '可排序字段 at / amount / accountNo；createdAt 是 at 的别名；默认 -at', schema: { type: string } }
         - { name: ownerId, in: query, schema: { type: string } }
+        - { name: orderId, in: query, x-status: proposed, description: '【提议】只看某张订单的流水（订单详情用）。后端忽略时前端会自行按 orderId 过滤', schema: { type: string } }
         - { name: type, in: query, schema: { type: string, enum: [accrue, pay, reverse] } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PayablePage' } } } }
@@ -703,6 +748,22 @@ paths:
       x-roles: [admin]
       responses:
         '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/StaffUser' } } } } }
+    post:
+      tags: [admin]
+      operationId: createStaff
+      x-status: proposed
+      summary: 新建用户（员工 / 成员 / 号主登录）；role=owner 时必须绑定一个尚未绑定的号主档案（一对一）
+      description: |
+        【提议，后端未实现，待用户确认】前端“新建用户”表单在 404 / 501 时提示“后端暂未支持”。
+        用户名唯一（大小写不敏感）→ 重复 409 DUPLICATE；ownerId 已被其他用户绑定 → 409 OWNER_ALREADY_BOUND；
+        role=owner 缺 ownerId、非 owner 传 ownerId、ownerId 不存在、密码过短 → 422 VALIDATION_FAILED（fields 指明字段）。
+        成功后号主档案的 userId 指向该用户；写操作日志「新建用户」（不记录密码）。密码只存哈希，响应不返回。
+      x-roles: [admin]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StaffCreate' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/StaffUser' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
   /staff/{username}:
     patch:
       tags: [admin]
@@ -716,6 +777,22 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/StaffUser' } } } }
         '409': { $ref: '#/components/responses/Conflict' }
+  /staff/{username}/password:
+    post:
+      tags: [admin]
+      operationId: resetStaffPassword
+      x-status: proposed
+      summary: 管理员重置用户密码（立即吊销该用户全部令牌；写操作日志「重置密码」，不记录密码）
+      description: 【提议，后端未实现，待用户确认】前端暂无入口。密码至少 8 位 → 否则 422。
+      x-roles: [admin]
+      parameters: [ { name: username, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [password], properties: { password: { type: string, minLength: 8, maxLength: 128 } } } } }
+      responses:
+        '204': { description: 已重置 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
   /audit-logs:
     get:
       tags: [admin]
@@ -725,6 +802,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/page'
         - $ref: '#/components/parameters/pageSize'
+        - { name: sort, in: query, description: '可排序字段 at / actor / action；createdAt 是 at 的别名；默认 -at', schema: { type: string } }
         - $ref: '#/components/parameters/q'
         - { name: actor, in: query, schema: { type: string } }
         - { name: action, in: query, schema: { type: string } }
@@ -752,6 +830,21 @@ components:
     pageSize: { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
     sort: { name: sort, in: query, description: '逗号分隔，`-` 前缀为降序，如 `-createdAt,accountNo`；未知字段 422', schema: { type: string } }
     q: { name: q, in: query, description: 关键字（模糊匹配，大小写不敏感）, schema: { type: string } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        可选。客户端每次“提交动作”生成一个 UUID（v4），重试 / 双击时复用同一个。服务端保留 24 小时：
+        同键 + 同请求体 → 重放首次响应（状态码与响应体相同，含首次的 4xx 业务错误），并带 `Idempotent-Replayed: true`；
+        同键 + 不同请求体 → 409 DUPLICATE。键的作用域为当前用户 + 路径。
+        建议：5xx、401、403、429 不保存（同键可再试）；首次请求仍在处理中时同键请求等待其完成后重放（处理方式由后端定）。
+      schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$', example: 3f0e1c9a-5b7d-4c1e-9a2f-6d8b0c4e1a7f }
+
+  headers:
+    IdempotentReplayed:
+      description: '可选（建议）：true 表示这是同一 Idempotency-Key 的重放响应（未重复执行）'
+      schema: { type: string, enum: ['true'] }
 
   responses:
     Unauthorized: { description: 未登录 / 令牌失效 / 用户被停用, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
@@ -776,7 +869,7 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: { type: string, description: 机器可读错误码，见契约错误码表, example: VALIDATION_FAILED }
+            code: { type: string, description: '机器可读错误码，见契约错误码表（幂等键配不同请求体也是 DUPLICATE）', example: VALIDATION_FAILED }
             message: { type: string, description: 可直接展示给用户的中文说明 }
             fields: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
             details: { type: object, additionalProperties: true }
@@ -801,9 +894,31 @@ components:
         username: { type: string }
         displayName: { type: string }
         role: { $ref: '#/components/schemas/Role' }
-        ownerId: { type: string, description: 仅 role=owner }
+        ownerId: { type: string, description: 'role=owner 时必有：绑定的号主档案 id（一对一，对应 OwnerProfile.userId）；其他角色省略' }
     StaffUser:
       allOf: [ { $ref: '#/components/schemas/User' }, { type: object, required: [enabled], properties: { enabled: { type: boolean } } } ]
+    StaffCreate:
+      type: object
+      required: [username, displayName, role, password]
+      properties:
+        username: { type: string, pattern: '^[A-Za-z0-9_.-]{3,32}$', description: 登录名，唯一（大小写不敏感） }
+        displayName: { type: string, minLength: 1, maxLength: 64 }
+        role: { $ref: '#/components/schemas/Role' }
+        password: { type: string, minLength: 8, maxLength: 128, description: 初始密码（只存哈希，不回显） }
+        ownerId: { type: string, description: role=owner 时必填，且该号主档案未绑定其他用户；其他角色不得传 }
+    Dicts:
+      type: object
+      required: [regions, loginMethods, ranks, safeBoxes, stamina, loads, skins]
+      properties:
+        regions: { type: array, items: { type: string } }
+        loginMethods: { type: array, items: { type: string } }
+        ranks: { type: array, items: { type: string } }
+        safeBoxes: { type: array, items: { type: integer } }
+        stamina: { type: array, items: { type: string } }
+        loads: { type: array, items: { type: string } }
+        skins:
+          type: array
+          items: { type: object, required: [name, category], properties: { name: { type: string }, category: { type: string, example: 红皮 } } }
     DemoAccount:
       type: object
       required: [username, password, role, displayName]
@@ -831,7 +946,8 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        url: { type: string, description: '<img src> 可用地址（见上传说明）' }
+        url: { type: string, description: '<img src> 可用的签名地址，有效期 1 小时；过期后 GET /uploads/{id} 重新签发' }
+        expiresAt: { allOf: [ { $ref: '#/components/schemas/DateTime' } ], x-status: proposed, description: '【提议】url 过期时间；前端据此提前续签。缺省时前端只在图片加载失败时续签' }
         mime: { type: string }
         size: { type: integer, description: 字节 }
         uploadedBy: { type: string }
@@ -1230,6 +1346,7 @@ components:
         deposit: { $ref: '#/components/schemas/Money' }
         totalAmount: { $ref: '#/components/schemas/Money' }
         ownerPayable: { $ref: '#/components/schemas/Money' }
+        ruleVersion: { type: integer, x-status: proposed, description: '【提议】计价规则版本 = 登记时账号报价快照的 quote.ruleVersion（§12-4、§12-8：租金按账号报价锁定）。缺省时前端显示 —' }
         regularApplied: { type: boolean }
         handedOver: { type: boolean }
         returned: { type: boolean }
@@ -1277,6 +1394,7 @@ components:
         rentalDays: { type: integer }
         regularApplied: { type: boolean }
         depositWaived: { type: boolean }
+        ruleVersion: { type: integer, x-status: proposed, description: '【提议】本次计价用的规则版本（账号报价快照的版本，可能低于当前版本）' }
     NoteBody:
       type: object
       properties: { note: { type: string, maxLength: 500 } }
@@ -1329,7 +1447,7 @@ components:
         id: { type: string }
         contact: { type: string }
         displayName: { type: string }
-        userId: { type: string }
+        userId: { type: string, description: 绑定的号主登录用户名（一对一）；未绑定时省略。管理员在 POST /staff 建号主用户时绑定 }
         consignedCount: { type: integer }
         cumulativeSettlement: { $ref: '#/components/schemas/Money' }
         accrued: { $ref: '#/components/schemas/Money' }

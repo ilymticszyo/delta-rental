@@ -306,6 +306,26 @@ await check('管理员：员工与角色、操作日志、号主门户全部', a
   await page.waitForSelector('.el-table__row >> text=李老板')
   await shot('23-admin-owner-portal')
 })
+await check('管理员：新建用户（后端未实现时显示“后端暂未支持”）', async () => {
+  await go('/admin/staff')
+  await page.click('button:has-text("新建用户")')
+  const dlg = page.locator('.staff-dialog')
+  await dlg.waitFor({ state: 'visible' })
+  await pickSelect(dlg, '角色', '客服')
+  const name = 'smoke' + Date.now().toString(36)
+  await dlg.locator('.el-form-item:has(label:text-is("登录名")) input').fill(name)
+  await dlg.locator('.el-form-item:has(label:text-is("名称")) input').fill('冒烟客服')
+  await dlg.locator('button:has-text("生成")').click()
+  await dlg.locator('button:has-text("创建")').click()
+  const r = await Promise.race([
+    page.waitForSelector(`.el-table__row >> text=${name}`, { timeout: 8000 }).then(() => 'created'),
+    page.waitForSelector('.staff-unsupported', { timeout: 8000 }).then(() => 'unsupported'),
+  ])
+  await shot(r === 'created' ? '23b-admin-staff-created' : '23b-admin-staff-unsupported')
+  if (r === 'unsupported') await page.waitForSelector('text=后端暂未支持新建用户')
+  else await expectNo(/后端暂未支持/, '不支持提示')
+  await page.keyboard.press('Escape')
+})
 await check('角色切换器可切到号主', async () => {
   await go('/admin/dashboard')
   await page.click('button:has-text("切换演示角色")')

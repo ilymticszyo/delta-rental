@@ -185,7 +185,7 @@ describe('订单、留痕与台账（A8 / C2 / C3）', () => {
     expect(done.endAt).toBe(new Date(new Date(o.startAt).getTime() + 5 * 864e5).toISOString())
     const prof = (await api.ownerProfiles()).find((x) => x.id === a.ownerId)!
     expect(prof.cumulativeSettlement).toBeGreaterThanOrEqual(o.ownerPayable)
-    expect(prof.balance).toBe(prof.accrued - prof.cumulativeSettlement - 0 - (await api.listPayables(a.ownerId)).filter((x) => x.type === 'reverse').reduce((s, x) => s + x.amount, 0))
+    expect(prof.balance).toBe(prof.accrued - prof.cumulativeSettlement - 0 - (await api.listPayables({ ownerId: a.ownerId })).filter((x) => x.type === 'reverse').reduce((s, x) => s + x.amount, 0))
   })
   it('即将到期的订单被标记，看板计数一致', async () => {
     const orders = await api.listOrders()
@@ -274,13 +274,67 @@ describe('回收、回本与版本化估值依据（B3 / B4 / C1 / C5）', () =>
 
 describe('经营报表（C11）', () => {
   it('出租率在 0-100 之间，分组合计与明细一致，自收号有回本周期', async () => {
-    const rep = await api.report(Date.now() - 30 * 864e5, Date.now(), 'safeBox')
+    const t = Date.now() // 两次报表用同一时间窗（分别取 Date.now() 时，恰在 30 天边界的种子订单会落在不同窗口里，偶发失败）
+    const rep = await api.report(t - 30 * 864e5, t, 'safeBox')
     expect(rep.utilization).toBeGreaterThan(0)
     expect(rep.utilization).toBeLessThanOrEqual(100)
     expect(rep.groups.reduce((s, g) => s + g.net, 0)).toBe(rep.net)
     expect(rep.accounts.reduce((s, a) => s + a.orders, 0)).toBe(rep.orderCount)
     expect(rep.payback.length).toBeGreaterThan(0)
-    const byPrice = await api.report(Date.now() - 30 * 864e5, Date.now(), 'price')
+    const byPrice = await api.report(t - 30 * 864e5, t, 'price')
     expect(byPrice.net).toBe(rep.net)
+  })
+})
+
+describe('v0.3 契约对齐：按账号报价版本计价、订单详情、新建用户', () => {
+  it('改计价规则不影响已上架账号：预览 / 登记按账号报价所记版本计价，订单记 ruleVersion', async () => {
+    const a = await listedConsign()
+    expect(a.quote.ruleVersion).toBe(1)
+    const rule = await api.getPricingRule()
+    const rates = Object.fromEntries(Object.entries(rule.channelFeeRates).map(([k, v]) => [k, Math.min(90, v + 30)]))
+    await api.savePricingRule({ ...rule, channelFeeRates: rates }, '服务费大涨')
+    expect((await api.getPricingRule()).version).toBe(2)
+    const pv = await api.previewOrder(a.id, 'wx_new_renter')
+    expect(pv.ruleVersion).toBe(1)
+    expect(pv.coinRent).toBe(a.quote.coinRent)
+    expect(pv.ownerPayable).toBe(a.quote.ownerSettlement)
+    const o = await order(a.id, 'wx_new_renter')
+    expect(o).toMatchObject({ ruleVersion: 1, coinRent: a.quote.coinRent, ownerPayable: a.quote.ownerSettlement })
+    // 编辑保存后才按新规则重算
+    const { id, accountNo, quote, createdAt, updatedAt, deleted, cumulativeIncome, paybackPercent, ownerName, ...rest } = (await api.listAccounts()).find((x) => x.status === 'listed' && x.source === 'consign' && x.id !== a.id)!
+    const saved = await api.saveAccount({ ...rest, id })
+    expect(saved.quote.ruleVersion).toBe(2)
+    expect((await api.ruleHistory()).pricing.every((h) => !('rule' in h))).toBe(true) // 快照不外露
+  })
+  it('getOrder 返回订单视图；listPayables 可按订单过滤', async () => {
+    const a = await listedConsign()
+    const o = await order(a.id)
+    const v = await api.getOrder(o.id)
+    expect(v).toMatchObject({ id: o.id, reminder: null, ownerPayableBalance: o.ownerPayable })
+    await expect(api.getOrder('nope')).rejects.toMatchObject({ code: 404 })
+    const ps = await api.listPayables({ orderId: o.id })
+    expect(ps.length).toBe(1)
+    expect(ps[0]).toMatchObject({ orderId: o.id, type: 'accrue' })
+  })
+  it('管理员新建号主用户并一对一绑定号主档案；校验与冲突', async () => {
+    const free = (await api.ownerProfiles()).find((o) => !o.userId)
+    // 种子号主都已绑定 → 先通过寄租账号建一个新档案
+    let ownerId = free?.id
+    if (!ownerId) {
+      const { id, accountNo, quote, createdAt, updatedAt, deleted, cumulativeIncome, paybackPercent, ownerName, ownerId: _o, ...rest } = await listedConsign()
+      const acc = await api.saveAccount({ ...rest, ownerContact: 'wx_new_owner_zhao', status: 'draft' })
+      ownerId = acc.ownerId!
+    }
+    await expect(api.createUser({ username: 'zhao', displayName: '赵老板', role: 'owner', password: 'short' })).rejects.toMatchObject({ code: 422, errorCode: 'VALIDATION_FAILED' })
+    await expect(api.createUser({ username: 'x1', displayName: 'x', role: 'cs', password: 'longenough', ownerId })).rejects.toMatchObject({ code: 422 })
+    await expect(api.createUser({ username: 'ADMIN', displayName: 'x', role: 'cs', password: 'longenough' })).rejects.toMatchObject({ code: 409, errorCode: 'DUPLICATE' })
+    await expect(api.createUser({ username: 'wang2', displayName: 'x', role: 'owner', password: 'longenough', ownerId: 'ow1' })).rejects.toMatchObject({ code: 409, errorCode: 'OWNER_ALREADY_BOUND' })
+    const u = await api.createUser({ username: 'zhao', displayName: '赵老板', role: 'owner', password: 'zhao12345', ownerId })
+    expect(u).toMatchObject({ username: 'zhao', role: 'owner', ownerId, enabled: true })
+    expect((await api.ownerProfiles()).find((o) => o.id === ownerId)?.userId).toBe('zhao')
+    expect((await api.auditLogs())[0].action).toBe('新建用户')
+    const me = await api.login('zhao', 'zhao12345')
+    expect(me.ownerId).toBe(ownerId)
+    expect((await api.ownerAccounts()).length).toBeGreaterThanOrEqual(1)
   })
 })
