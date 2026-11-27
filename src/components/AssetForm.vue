@@ -25,7 +25,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { FormInstance } from 'element-plus'
-import { dicts } from '../config/rules'
+import { dicts } from '../config/dictStore'
 import type { ValuationInput } from '../domain/types'
 const props = withDefaults(defineProps<{ m: ValuationInput; showContact?: boolean }>(), { showContact: true })
 const req = (msg: string) => [{ required: true, message: msg, trigger: 'change' }]

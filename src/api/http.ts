@@ -6,10 +6,12 @@ import type { Report, ReportDimension } from '../domain/reports'
 import type {
   AccountAdminView, AccountInput, AccountStatus, Attachment, CsAgent, DashboardStats, DepositEntry, LobbyAccount, NewAttachment, OrderInput,
   OwnerAccountView, OwnerPayableEntry, OwnerProfile, PricingInput, PricingResult, RecycleRequest, RecycleStatus, RenterProfile, RenterTag,
-  RentalOrder, StaffUser, User, ValuationInput, ValuationResult,
+  RentalOrder, StaffCreateInput, StaffUser, User, ValuationInput, ValuationResult,
 } from '../domain/types'
+import { applyDicts, skinCategoryOf, type Dicts } from '../config/dictStore'
+import { isRetryable } from './idempotency'
 import { ApiError, type FieldError } from './errors'
-import type { Api, ApiFeatures, AuditLog, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PricingOptions } from './types'
+import type { Api, ApiFeatures, AuditLog, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PayableFilter, PricingOptions, SubmitOptions } from './types'
 
 export interface TokenStore { get(): string | null; set(token: string | null): void }
 /** 默认 token 存 localStorage（见契约「鉴权」一节的取舍说明） */
@@ -32,6 +34,8 @@ export interface HttpApiOptions {
   onUnauthorized?: () => void
   timeoutMs?: number
   pageSize?: number // 拉全量列表时每页条数（≤ 契约上限 200）
+  /** 带 Idempotency-Key 的写请求遇到网络错误 / 超时 / 5xx 时，用同一个键自动重试的间隔（默认 0.5s、1.5s） */
+  retryDelaysMs?: number[]
 }
 
 interface Page<T> { items: T[]; total: number; page: number; pageSize: number }
@@ -42,6 +46,12 @@ type ServerAttachment = Omit<Attachment, 'dataUrl'> & { url: string }
 const STATUS_MESSAGE: Record<number, string> = {
   400: '请求有误', 401: '登录已失效，请重新登录', 403: '无权限（403）', 404: '数据不存在', 409: '数据状态已变化，请刷新后重试',
   413: '文件过大', 415: '不支持的文件类型', 422: '数据校验未通过', 429: '操作太频繁，请稍后再试', 500: '服务器开小差了，请稍后再试', 502: '服务暂不可用', 503: '服务暂不可用',
+}
+
+/** 提议接口未实现：404 / 405 / 501 */
+export const isNotSupported = (e: unknown) => e instanceof ApiError && [404, 405, 501].includes(e.code)
+function notSupported(e: unknown, message: string) {
+  return isNotSupported(e) ? new ApiError(message, (e as ApiError).code, 'NOT_SUPPORTED', [], (e as ApiError).requestId) : e
 }
 
 export function defaultUnauthorized() {
@@ -70,6 +80,7 @@ export class HttpApi implements Api {
   private onUnauthorized: () => void
   private timeoutMs: number
   private pageSize: number
+  private retryDelays: number[]
   private user: User | null = null
   private meta: Meta = { version: '', demo: false }
 
@@ -80,6 +91,7 @@ export class HttpApi implements Api {
     this.onUnauthorized = opts.onUnauthorized ?? defaultUnauthorized
     this.timeoutMs = opts.timeoutMs ?? 20000
     this.pageSize = Math.min(opts.pageSize ?? 200, 200)
+    this.retryDelays = opts.retryDelaysMs ?? [500, 1500]
   }
 
   // ---------- 传输 ----------
@@ -88,8 +100,8 @@ export class HttpApi implements Api {
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&')
     return `${this.base}${path}${qs ? '?' + qs : ''}`
   }
-  private async request<T>(method: string, path: string, o: { query?: Query; body?: unknown; form?: FormData; auth?: 'session' | 'login' | 'probe' } = {}): Promise<T> {
-    const headers: Record<string, string> = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+  private async request<T>(method: string, path: string, o: { query?: Query; body?: unknown; form?: FormData; auth?: 'session' | 'login' | 'probe'; headers?: Record<string, string> } = {}): Promise<T> {
+    const headers: Record<string, string> = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', ...(o.headers ?? {}) }
     const token = this.tokens.get()
     if (token) headers.Authorization = `Bearer ${token}`
     let body: BodyInit | undefined
@@ -138,6 +150,21 @@ export class HttpApi implements Api {
     return out
   }
   private id(v: string) { return encodeURIComponent(v) }
+  /**
+   * 带 Idempotency-Key 的 POST：结果不确定（网络 / 超时 / 5xx / 处理中）时用**同一个键**自动重试，
+   * 服务端对同键同体重放首次响应，所以不会重复登记订单 / 入库 / 付款。没有键时就是普通 POST。
+   */
+  private async keyedPost<T>(path: string, body: unknown, opts?: SubmitOptions): Promise<T> {
+    const key = opts?.idempotencyKey
+    if (!key) return this.post<T>(path, body)
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.request<T>('POST', path, { body, headers: { 'Idempotency-Key': key } }) }
+      catch (e) {
+        if (attempt >= this.retryDelays.length || !isRetryable(e) || (e instanceof ApiError && e.code === 429)) throw e
+        await new Promise((ok) => setTimeout(ok, this.retryDelays[attempt]))
+      }
+    }
+  }
 
   // ---------- 映射 ----------
   private att = (a: ServerAttachment | Attachment): Attachment => ({ ...(a as any), dataUrl: (a as ServerAttachment).url ?? (a as Attachment).dataUrl })
@@ -162,12 +189,34 @@ export class HttpApi implements Api {
     if (!this.tokens.get()) { this.user = null; return }
     try { this.user = (await this.request<{ user: User }>('GET', '/auth/me', { auth: 'probe' })).user }
     catch (e) { if (e instanceof ApiError && e.code === 401) { this.tokens.set(null); this.user = null } else throw e }
+    if (this.user) await this.loadDicts()
+  }
+  /**
+   * 字典与渠道 / 周期从服务端读（只读配置）。GET /dicts 是提议接口：后端没有时，ops / admin 退回
+   * GET /accounts/import/context（皮肤只有名称，分类沿用内置字典），其他角色只更新渠道 / 周期。失败不阻塞登录。
+   */
+  private async loadDicts() {
+    try {
+      const p = await this.pricingOptions()
+      let d: Partial<Dicts> | null = null
+      try { d = await this.getDicts() }
+      catch (e) {
+        if (!isNotSupported(e)) throw e
+        if (this.user && (this.user.role === 'ops' || this.user.role === 'admin')) {
+          const ctx = await this.importContext()
+          const { regions, loginMethods, ranks, safeBoxes, stamina, loads } = ctx
+          d = { regions, loginMethods, ranks, safeBoxes, stamina, loads, skins: ctx.skins.map((name) => ({ name, category: skinCategoryOf(name) })) }
+        }
+      }
+      applyDicts({ ...(d ?? {}), channels: p.channels, cycles: p.cycles }, d ? 'server' : 'bundled')
+    } catch (e) { console.warn('[api] 读取字典失败，使用内置字典', e) }
   }
   features(): ApiFeatures { return { mode: 'http', demo: !!this.meta.demo, serverVersion: this.meta.version || undefined } }
   async login(username: string, password: string) {
     const r = await this.request<{ token: string; expiresAt: string; user: User }>('POST', '/auth/login', { body: { username, password }, auth: 'login' })
     this.tokens.set(r.token)
     this.user = r.user
+    await this.loadDicts()
     return r.user
   }
   async logout() {
@@ -191,6 +240,8 @@ export class HttpApi implements Api {
   myRecycles() { return this.all<RecycleRequest>('/recycles/mine') }
   async currentCsAgent(_now?: Date) { return (await this.get<{ agent: CsAgent | null }>('/cs-agents/current')).agent }
   listCsAgents() { return this.get<CsAgent[]>('/cs-agents') }
+  getDicts() { return this.get<Dicts>('/dicts') }
+  async refreshAttachment(id: string) { return this.att(await this.get<ServerAttachment>(`/uploads/${this.id(id)}`)) }
 
   // ---------- 号主门户 ----------
   async ownerAccounts() { return (await this.all<OwnerAccountView>('/owner/accounts')).map(this.withAtt) }
@@ -212,23 +263,24 @@ export class HttpApi implements Api {
     return this.withAtt(id ? await this.put<AccountAdminView>(`/accounts/${this.id(id)}`, body) : await this.post<AccountAdminView>('/accounts', body))
   }
   importContext() { return this.get<ImportContext>('/accounts/import/context') }
-  importAccounts(aoa: unknown[][], fileName: string) { return this.post<ImportOutcome>('/accounts/import', { fileName, rows: aoa, dryRun: false }) }
+  importAccounts(aoa: unknown[][], fileName: string, opts?: SubmitOptions) { return this.keyedPost<ImportOutcome>('/accounts/import', { fileName, rows: aoa, dryRun: false }, opts) }
   async deleteAccount(id: string) { await this.request<void>('DELETE', `/accounts/${this.id(id)}`) }
   async setAccountStatus(id: string, status: AccountStatus) { return this.withAtt(await this.post<AccountAdminView>(`/accounts/${this.id(id)}/status`, { status })) }
 
   // ---------- 订单与台账 ----------
   listOrders() { return this.all<OrderView>('/orders') }
+  getOrder(id: string) { return this.get<OrderView>(`/orders/${this.id(id)}`) }
   previewOrder(accountId: string, renterContact: string) { return this.post<OrderPreview>('/orders/preview', { accountId, renterContact }) }
-  createOrder(input: OrderInput) { return this.post<RentalOrder>('/orders', input) }
+  createOrder(input: OrderInput, opts?: SubmitOptions) { return this.keyedPost<RentalOrder>('/orders', input, opts) }
   markHandover(id: string, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/handover`, { note }) }
   extendOrder(id: string, rentalDays: number, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/extend`, { rentalDays, note }) }
   endOrder(id: string, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/end`, { note }) }
   markReturned(id: string, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/return`, { note }) }
   addDepositEntry(id: string, entry: Omit<DepositEntry, 'at' | 'operator'>) { return this.post<RentalOrder>(`/orders/${this.id(id)}/deposits`, entry) }
-  payOwner(orderId: string, amount: number, note: string) { return this.post<RentalOrder>(`/orders/${this.id(orderId)}/owner-payments`, { amount, note }) }
+  payOwner(orderId: string, amount: number, note: string, opts?: SubmitOptions) { return this.keyedPost<RentalOrder>(`/orders/${this.id(orderId)}/owner-payments`, { amount, note }, opts) }
   completeOrder(id: string, relist: boolean, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/complete`, { relist, note }) }
   cancelOrder(id: string, note = '') { return this.post<RentalOrder>(`/orders/${this.id(id)}/cancel`, { note }) }
-  listPayables(ownerId?: string) { return this.all<OwnerPayableEntry>('/payables', { ownerId }) }
+  listPayables(filter: PayableFilter = {}) { return this.all<OwnerPayableEntry>('/payables', { ownerId: filter.ownerId, orderId: filter.orderId }) }
 
   // ---------- 客户档案 ----------
   renterProfiles() { return this.all<RenterProfile>('/renters') }
@@ -256,6 +308,11 @@ export class HttpApi implements Api {
   }
   dashboard(_now?: Date) { return this.get<DashboardStats>('/dashboard') }
   listUsers() { return this.get<StaffUser[]>('/staff') }
+  /** POST /staff 是契约里的提议操作（x-status: proposed）：后端没实现时（404 / 405 / 501）给出明确提示 */
+  async createUser(input: StaffCreateInput) {
+    try { return await this.post<StaffUser>('/staff', input) }
+    catch (e) { throw notSupported(e, '后端暂未支持新建用户（POST /api/staff 未实现），请联系后端开通或先在服务器上创建') }
+  }
   setUserEnabled(username: string, enabled: boolean) { return this.patch<StaffUser>(`/staff/${this.id(username)}`, { enabled }) }
   auditLogs() { return this.all<AuditLog>('/audit-logs') }
   async resetDemo() { await this.post<void>('/demo/reset') }

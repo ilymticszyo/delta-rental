@@ -45,6 +45,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '../../api'
 import type { ImportOutcome } from '../../api/types'
 import { IMPORT_MAX_ROWS, parseImport, type ImportParseResult } from '../../domain/importAccounts'
+import { createSubmitKey } from '../../api/idempotency'
 import { run } from '../../utils'
 
 defineProps<{ modelValue: boolean }>()
@@ -55,7 +56,9 @@ const headerErrors = ref<string[]>([]), view = ref<'all' | 'bad'>('all')
 const step = computed(() => (outcome.value ? 3 : result.value && !headerErrors.value.length ? 2 : 1))
 const shown = computed(() => (result.value?.rows ?? []).filter((r) => view.value === 'all' || r.errors.length))
 
-function reset() { fileName.value = ''; aoa.value = []; result.value = undefined; outcome.value = undefined; headerErrors.value = []; view.value = 'all' }
+// 同一份文件的“确认导入”共用一个 Idempotency-Key：超时 / 断网后再点不会重复入库
+const submitKey = createSubmitKey()
+function reset() { submitKey.reset(); fileName.value = ''; aoa.value = []; result.value = undefined; outcome.value = undefined; headerErrors.value = []; view.value = 'all' }
 function close(v: boolean) { if (!v) { emit('update:modelValue', false); reset() } }
 async function downloadTpl() {
   tplLoading.value = true
@@ -78,7 +81,8 @@ async function onFile(f: UploadFile) {
 }
 async function confirm() {
   importing.value = true
-  const r = await run(() => api.importAccounts(aoa.value, fileName.value))
+  const body = { fileName: fileName.value, rows: aoa.value }
+  const r = await run(() => submitKey.submit(body, (idempotencyKey) => api.importAccounts(body.rows, body.fileName, { idempotencyKey })))
   importing.value = false
   if (r) { outcome.value = r; ElMessage.success(`已导入 ${r.imported.length} 个账号，状态为待确认`); emit('imported', r.imported) }
 }

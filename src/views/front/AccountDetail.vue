@@ -65,7 +65,7 @@
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../../api'
-import { skinCategory } from '../../config/rules'
+import { skinCategoryOf as skinCategory } from '../../config/dictStore'
 import { ACCOUNT_STATUS_LABEL, type LobbyAccount as Account } from '../../domain/types'
 import { copy, statusTagType } from '../../utils'
 import ContactDialog from '../../components/ContactDialog.vue'

@@ -7,8 +7,9 @@ import type { Report, ReportDimension } from '../domain/reports'
 import type {
   AccountAdminView, AccountInput, AccountStatus, Attachment, CsAgent, DashboardStats, DepositEntry, LobbyAccount, OrderInput, OwnerAccountView,
   OwnerPayableEntry, OwnerProfile, PricingInput, PricingResult, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder,
-  Role, StaffUser, User, ValuationInput, ValuationResult, NewAttachment,
+  Role, StaffCreateInput, StaffUser, User, ValuationInput, ValuationResult, NewAttachment,
 } from '../domain/types'
+import type { Dicts } from '../config/dictStore'
 import type { AuditLog } from '../mock/seed'
 export type { AuditLog }
 
@@ -25,7 +26,12 @@ export interface OrderPreview {
   rentalDays: number
   regularApplied: boolean
   depositWaived: boolean
+  /** 本次计价使用的规则版本（账号报价快照的版本，可能低于当前规则版本） */
+  ruleVersion: number
 }
+/** 带 Idempotency-Key 的写操作选项（见 src/api/idempotency.ts） */
+export interface SubmitOptions { idempotencyKey?: string }
+export interface PayableFilter { ownerId?: string; orderId?: string }
 export interface OwnerListingInput { asset: ValuationInput; assistTime: string; remark: string; attachments: NewAttachment[]; fromRecycleId?: string }
 /** 运行模式与开关：mock = 浏览器本地演示；http = 真实后端。demo=true 时才显示演示专用 UI（演示账号、角色切换、重置数据） */
 export interface ApiFeatures { mode: 'mock' | 'http'; demo: boolean; serverVersion?: string }
@@ -53,6 +59,10 @@ export interface Api {
   myRecycles(): Promise<RecycleRequest[]>
   currentCsAgent(now?: Date): Promise<CsAgent | null>
   listCsAgents(): Promise<CsAgent[]>
+  /** 选项字典（只读；http 模式来自 GET /dicts） */
+  getDicts(): Promise<Dicts>
+  /** 截图地址过期后重新签发（mock 原样返回） */
+  refreshAttachment(id: string): Promise<Attachment>
 
   // 号主门户（E1–E4）
   ownerAccounts(): Promise<OwnerAccountView[]>
@@ -67,23 +77,24 @@ export interface Api {
   /** 批量导入的校验上下文（字典 + 已有编号）；仅运营 / 管理员 */
   importContext(): Promise<ImportContext>
   /** 批量导入：服务端重新逐行校验，合法行以「待确认」入库，非法行跳过；记操作日志 */
-  importAccounts(aoa: unknown[][], fileName: string): Promise<ImportOutcome>
+  importAccounts(aoa: unknown[][], fileName: string, opts?: SubmitOptions): Promise<ImportOutcome>
   deleteAccount(id: string): Promise<void>
   setAccountStatus(id: string, status: AccountStatus): Promise<AccountAdminView>
 
   // 后台：订单与台账
   listOrders(): Promise<OrderView[]>
+  getOrder(id: string): Promise<OrderView>
   previewOrder(accountId: string, renterContact: string): Promise<OrderPreview>
-  createOrder(input: OrderInput): Promise<RentalOrder>
+  createOrder(input: OrderInput, opts?: SubmitOptions): Promise<RentalOrder>
   markHandover(id: string, note?: string): Promise<RentalOrder>
   extendOrder(id: string, rentalDays: number, note?: string): Promise<RentalOrder>
   endOrder(id: string, note?: string): Promise<RentalOrder>
   markReturned(id: string, note?: string): Promise<RentalOrder>
   addDepositEntry(id: string, entry: Omit<DepositEntry, 'at' | 'operator'>): Promise<RentalOrder>
-  payOwner(orderId: string, amount: number, note: string): Promise<RentalOrder>
+  payOwner(orderId: string, amount: number, note: string, opts?: SubmitOptions): Promise<RentalOrder>
   completeOrder(id: string, relist: boolean, note?: string): Promise<RentalOrder>
   cancelOrder(id: string, note?: string): Promise<RentalOrder>
-  listPayables(ownerId?: string): Promise<OwnerPayableEntry[]>
+  listPayables(filter?: PayableFilter): Promise<OwnerPayableEntry[]>
 
   // 后台：客户档案（C12）
   renterProfiles(): Promise<RenterProfile[]>
@@ -109,6 +120,8 @@ export interface Api {
   report(fromMs: number, toMs: number, dimension: ReportDimension): Promise<Report>
   dashboard(now?: Date): Promise<DashboardStats>
   listUsers(): Promise<StaffUser[]>
+  /** 管理员新建用户；号主用户须绑定一个未绑定的号主档案 */
+  createUser(input: StaffCreateInput): Promise<StaffUser>
   setUserEnabled(username: string, enabled: boolean): Promise<StaffUser>
   auditLogs(): Promise<AuditLog[]>
   resetDemo(): Promise<void>

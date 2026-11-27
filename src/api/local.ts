@@ -1,5 +1,6 @@
 // localStorage 实现：模拟后端。算价 / 估值 / 状态流转 / 鉴权 / 字段裁剪全部在这一层执行。
 import { dicts, type PricingRule, type ValuationRule } from '../config/rules'
+import type { Dicts } from '../config/dictStore'
 import { IMPORT_MAX_ROWS, parseImport, type ImportContext } from '../domain/importAccounts'
 import { calcPricing } from '../domain/pricing'
 import { can, type Cap } from '../domain/permissions'
@@ -8,9 +9,9 @@ import { calcValuation, validateValuationInput } from '../domain/valuation'
 import { lobbyAccountFor, pricingFor, toOwnerView } from '../domain/visibility'
 import type {
   Account, AccountAdminView, AccountInput, Attachment, AccountStatus, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep, OwnerPayableEntry,
-  OwnerProfile, PricingInput, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder, StaffUser, User, ValuationInput,
+  OwnerProfile, PricingInput, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder, StaffCreateInput, StaffUser, User, ValuationInput,
 } from '../domain/types'
-import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL } from '../domain/types'
+import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL, ROLE_LABEL } from '../domain/types'
 import { buildSeedDb, demoUsers, SEED_VERSION, toPricingInput, type Db, type DbUser } from '../mock/seed'
 import type { Api, ApiFeatures, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PricingOptions } from './types'
 
@@ -18,7 +19,7 @@ const DB_KEY = 'dr:v1:db'
 const SESSION_KEY = 'dr:v1:session'
 const DAY = 86400000
 
-import { ApiError } from './errors'
+import { ApiError, type FieldError } from './errors'
 export { ApiError }
 
 const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)))
@@ -269,6 +270,23 @@ export class LocalApi implements Api {
     return clone(on ?? agents.find((a) => a.isFallback) ?? null)
   }
   async listCsAgents() { return clone(this.load().csAgents) }
+  async getDicts(): Promise<Dicts> {
+    this.need('front')
+    const { regions, loginMethods, ranks, safeBoxes, stamina, loads, skins } = dicts
+    return clone({ regions, loginMethods, ranks, safeBoxes, stamina, loads, skins })
+  }
+  /** mock 的截图是 data URL，不会过期：原样返回（仍按可见性检查） */
+  async refreshAttachment(id: string): Promise<Attachment> {
+    const u = this.need('front')
+    const db = this.load()
+    for (const a of db.accounts) {
+      const x = a.attachments.find((y) => y.id === id)
+      if (!x) continue
+      const mine = u.role === 'owner' && !!u.ownerId && (a.ownerId === u.ownerId || a.formerOwnerId === u.ownerId)
+      if (can(u.role, 'inventoryView') || can(u.role, 'ownerPortalAll') || mine) return clone(x)
+    }
+    throw new ApiError('截图不存在', 404, 'NOT_FOUND')
+  }
 
   // ---------- 号主门户 ----------
   async ownerAccounts() {
@@ -433,11 +451,24 @@ export class LocalApi implements Api {
   async listOrders(): Promise<OrderView[]> {
     this.need('orders')
     const db = this.load()
-    return clone(db.orders).map((o) => ({ ...o, reminder: this.reminderOf(db, o), ownerPayableBalance: this.orderPayableBalance(db, o) }))
+    return clone(db.orders).map((o) => this.orderView(db, o))
+  }
+  async getOrder(id: string): Promise<OrderView> {
+    this.need('orders')
+    const db = this.load()
+    const o = db.orders.find((x) => x.id === id)
+    if (!o) throw new ApiError('订单不存在', 404, 'NOT_FOUND')
+    return this.orderView(db, clone(o))
+  }
+  private orderView(db: Db, o: RentalOrder): OrderView { return { ...o, reminder: this.reminderOf(db, o), ownerPayableBalance: this.orderPayableBalance(db, o) } }
+  /** 账号报价快照所记版本的计价规则；改规则不影响已上架账号的价格（缺快照时退回当前规则） */
+  private pricingRuleAt(db: Db, version: number | undefined): PricingRule {
+    if (version === undefined || version === db.pricingRule.version) return db.pricingRule
+    return db.pricingHistory.find((h) => h.version === version)?.rule ?? db.pricingRule
   }
   private orderQuote(db: Db, a: Account, renterContact: string) {
     const tag = this.renterTag(db, renterContact)
-    const q = calcPricing(toPricingInput(a, tag === 'regular'), db.pricingRule)
+    const q = calcPricing(toPricingInput(a, tag === 'regular'), this.pricingRuleAt(db, a.quote?.ruleVersion))
     return { tag, q }
   }
   async previewOrder(accountId: string, renterContact: string): Promise<OrderPreview> {
@@ -448,6 +479,7 @@ export class LocalApi implements Api {
     return {
       profile: this.renterProfile(db, renterContact), blocked: tag === 'blacklist', coinRent: q.coinRent, extraFee: q.extraFee, deposit: q.deposit,
       ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, rentalDays: q.rentalDays, regularApplied: q.regularDiscountApplied, depositWaived: q.depositWaived,
+      ruleVersion: q.ruleVersion,
     }
   }
   async createOrder(input: OrderInput) {
@@ -468,7 +500,8 @@ export class LocalApi implements Api {
       if (!(input.rentalDays >= 1)) throw new ApiError('租期至少 1 天')
       if (input.deposit < 0 || input.extraFee < 0) throw new ApiError('金额不能为负')
       const regular = tag === 'regular'
-      const deposit = regular && db.pricingRule.regularWaiveDeposit ? 0 : Math.round(input.deposit)
+      const rule = this.pricingRuleAt(db, a.quote?.ruleVersion)
+      const deposit = regular && rule.regularWaiveDeposit ? 0 : Math.round(input.deposit)
       const extraFee = Math.round(input.extraFee)
       db.seq.order++
       const at = nowIso()
@@ -476,14 +509,14 @@ export class LocalApi implements Api {
         id: `o${db.seq.order}`, orderNo: `ZD${String(db.seq.order).padStart(5, '0')}`, accountId: a.id, accountNo: a.accountNo,
         renterContact: input.renterContact.trim(), startAt: input.startAt, endAt: addDays(input.startAt, input.rentalDays),
         rentalDays: input.rentalDays, coinRent: q.coinRent, extraFee, deposit, totalAmount: q.coinRent + extraFee + deposit,
-        ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, regularApplied: regular, handedOver: false, returned: false,
+        ownerPayable: a.source === 'consign' ? q.ownerSettlement : 0, ruleVersion: q.ruleVersion, regularApplied: regular, handedOver: false, returned: false,
         status: 'active', remark: input.remark, deposits: [], events: [], createdBy: user.username, createdAt: at,
       }
       this.event(o, 'register', `登记 ${o.rentalDays} 天，租金 ${o.coinRent}${regular ? '（熟客优惠）' : ''}${tag === 'caution' ? '【慎租】' : ''}`, user.username)
       if (deposit > 0) {
         o.deposits.push({ type: 'collect', amount: deposit, reason: '收取押金', at, operator: user.username })
         this.event(o, 'collect', `收押金 ${deposit}`, user.username)
-      } else if (regular && db.pricingRule.regularWaiveDeposit) this.event(o, 'collect', '熟客免押金', user.username)
+      } else if (regular && rule.regularWaiveDeposit) this.event(o, 'collect', '熟客免押金', user.username)
       db.orders.unshift(o)
       if (o.ownerPayable) this.addPayable(db, a, o, 'accrue', o.ownerPayable, '订单登记计提', user.username)
       a.status = 'rented'
@@ -581,9 +614,10 @@ export class LocalApi implements Api {
       this.event(o, 'cancel', note || '取消订单', u.username)
     }, '取消订单')
   }
-  async listPayables(ownerId?: string) {
+  async listPayables(filter: { ownerId?: string; orderId?: string } = {}) {
     this.need('orders')
-    return clone(this.load().payables.filter((p) => !ownerId || p.ownerId === ownerId)).sort((a, b) => b.at.localeCompare(a.at))
+    const { ownerId, orderId } = filter
+    return clone(this.load().payables.filter((p) => (!ownerId || p.ownerId === ownerId) && (!orderId || p.orderId === orderId))).sort((a, b) => b.at.localeCompare(a.at))
   }
 
   // ---------- 客户档案 ----------
@@ -691,7 +725,7 @@ export class LocalApi implements Api {
     const u = this.need('rulesEdit')
     return this.tx((db) => {
       db.pricingRule = { ...clone(rule), version: db.pricingRule.version + 1 }
-      db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: nowIso(), savedBy: u.username, summary: summary || '修改计价规则' })
+      db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: nowIso(), savedBy: u.username, summary: summary || '修改计价规则', rule: clone(db.pricingRule) })
       this.audit(db, '计价规则', `保存为 v${db.pricingRule.version} ${summary}`)
       return db.pricingRule
     })
@@ -709,7 +743,7 @@ export class LocalApi implements Api {
   async ruleHistory() {
     this.need('rulesEdit')
     const db = this.load()
-    return { pricing: clone(db.pricingHistory), valuation: db.valuationHistory.map(({ rule, ...m }) => clone(m)) }
+    return { pricing: db.pricingHistory.map(({ rule, ...m }) => clone(m)), valuation: db.valuationHistory.map(({ rule, ...m }) => clone(m)) }
   }
   async trialPricing(input: PricingInput, rule: PricingRule) { this.need('rulesEdit'); return calcPricing(input, rule) }
   async trialValuation(input: ValuationInput, rule: ValuationRule) { this.need('rulesEdit'); return calcValuation(input, rule) }
@@ -748,6 +782,42 @@ export class LocalApi implements Api {
   async listUsers(): Promise<StaffUser[]> {
     this.need('staff')
     return this.load().users.map((u) => ({ ...this.toUser(u), enabled: u.enabled }))
+  }
+  async createUser(input: StaffCreateInput): Promise<StaffUser> {
+    this.need('staff')
+    const username = String(input.username ?? '').trim()
+    const displayName = String(input.displayName ?? '').trim()
+    const fields: FieldError[] = []
+    if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) fields.push({ field: 'username', message: '登录名为 3–32 位字母、数字或 _ . -' })
+    if (!displayName) fields.push({ field: 'displayName', message: '请填写名称' })
+    if (!(input.role in ROLE_LABEL)) fields.push({ field: 'role', message: '角色无效' })
+    if (String(input.password ?? '').length < 8) fields.push({ field: 'password', message: '初始密码至少 8 位' })
+    if (input.role === 'owner' && !input.ownerId) fields.push({ field: 'ownerId', message: '号主用户需绑定号主档案' })
+    if (input.role !== 'owner' && input.ownerId) fields.push({ field: 'ownerId', message: '只有号主用户可以绑定号主档案' })
+    return this.tx((db) => {
+      const owner = input.ownerId ? db.owners.find((o) => o.id === input.ownerId) : undefined
+      if (input.ownerId && !owner) fields.push({ field: 'ownerId', message: '号主档案不存在' })
+      if (fields.length) throw new ApiError(fields.map((f) => f.message).join('；'), 422, 'VALIDATION_FAILED', fields)
+      if (db.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) throw new ApiError(`登录名 ${username} 已存在`, 409, 'DUPLICATE', [{ field: 'username', message: '已存在' }])
+      if (owner && (owner.userId || db.users.some((u) => u.ownerId === owner.id)))
+        throw new ApiError(`号主档案「${owner.displayName}」已绑定登录 ${owner.userId ?? ''}`.trim(), 409, 'OWNER_ALREADY_BOUND', [{ field: 'ownerId', message: '已绑定其他用户' }])
+      const u: DbUser = { username, password: input.password, displayName, role: input.role, enabled: true, ...(owner ? { ownerId: owner.id } : {}) }
+      db.users.push(u)
+      if (owner) owner.userId = username
+      this.audit(db, '新建用户', `${username}（${ROLE_LABEL[input.role]}）${owner ? ` 绑定号主 ${owner.displayName}` : ''}`)
+      return { ...this.toUser(u), enabled: true }
+    })
+  }
+  /** 契约提议的 POST /staff/{username}/password（不在 Api 接口里：前端暂无入口，仅供假后端） */
+  async resetUserPassword(username: string, password: string) {
+    this.need('staff')
+    if (String(password ?? '').length < 8) throw new ApiError('密码至少 8 位', 422, 'VALIDATION_FAILED', [{ field: 'password', message: '至少 8 位' }])
+    this.tx((db) => {
+      const u = db.users.find((x) => x.username === username)
+      if (!u) throw new ApiError('用户不存在', 404, 'NOT_FOUND')
+      u.password = password
+      this.audit(db, '重置密码', username)
+    })
   }
   async setUserEnabled(username: string, enabled: boolean) {
     const me = this.need('staff')

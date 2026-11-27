@@ -33,8 +33,12 @@
       <el-table-column label="比例" width="60"><template #default="{ row }">1:{{ row.coinRatio }}</template></el-table-column>
       <el-table-column label="租金/号主可得" width="110"><template #default="{ row }">{{ row.quote.coinRent }} / {{ row.quote.ownerSettlement }}</template></el-table-column>
       <el-table-column label="总金额" width="72"><template #default="{ row }">{{ row.quote.totalAmount }}</template></el-table-column>
+      <el-table-column label="规则" width="70"><template #default="{ row }">
+        <el-tooltip v-if="rule && row.quote.ruleVersion < rule.version" :content="`报价按计价规则 v${row.quote.ruleVersion} 生成，当前为 v${rule.version}；编辑保存后才按新规则重算`" placement="top">
+          <el-tag size="small" type="warning" class="rule-old">v{{ row.quote.ruleVersion }}</el-tag></el-tooltip>
+        <span v-else class="muted">v{{ row.quote.ruleVersion }}</span></template></el-table-column>
       <el-table-column label="皮肤" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.skins.join('、') || '—' }}</template></el-table-column>
-      <el-table-column label="截图" width="56"><template #default="{ row }"><el-button v-if="row.attachments.length" link type="primary" @click="shots = row.attachments.map((x: any) => x.dataUrl); shotDlg = true">{{ row.attachments.length }} 张</el-button><span v-else class="muted">—</span></template></el-table-column>
+      <el-table-column label="截图" width="56"><template #default="{ row }"><el-button v-if="row.attachments.length" link type="primary" @click="shots = row.attachments; shotDlg = true">{{ row.attachments.length }} 张</el-button><span v-else class="muted">—</span></template></el-table-column>
       <el-table-column label="操作" width="230" fixed="right"><template #default="{ row }">
         <el-button link type="primary" @click="openEdit(row)">{{ editable ? '编辑' : '查看' }}</el-button>
         <el-dropdown v-if="editable && transitions[row.status as AccountStatus].length" @command="(s: AccountStatus) => setStatus(row, s)" style="margin:0 10px">
@@ -91,15 +95,15 @@
     <div style="margin-top:8px" class="acc-shots">
       <div class="muted" style="margin-bottom:4px">资产截图（最多 5 张，单张 ≤1MB；导入的账号在这里补传）</div>
       <el-upload action="#" list-type="picture-card" :auto-upload="false" accept="image/png,image/jpeg,image/webp" :limit="5" v-model:file-list="shotFiles"
-        :disabled="!editable" :on-exceed="() => ElMessage.warning('最多 5 张')" :on-preview="(f: any) => { shots = [f.url]; shotDlg = true }">
+        :disabled="!editable" :on-exceed="() => ElMessage.warning('最多 5 张')" :on-preview="(f: any) => { shots = [f.att ?? { id: '', name: f.name, dataUrl: f.url, uploadedBy: '', at: '' }]; shotDlg = true }">
         <el-icon v-if="editable"><Plus /></el-icon>
       </el-upload>
     </div>
-    <template #footer><el-button @click="dlg = false">{{ editable ? '取消' : '关闭' }}</el-button><el-button v-if="editable" type="primary" @click="save">保存（按当前规则生成报价）</el-button></template>
+    <template #footer><el-button @click="dlg = false">{{ editable ? '取消' : '关闭' }}</el-button><span v-if="editable && editingNo && rule && editingRuleVersion != null && editingRuleVersion < rule.version" class="muted" style="margin-right:8px">当前报价按 v{{ editingRuleVersion }}，保存后按 v{{ rule.version }} 重算</span><el-button v-if="editable" type="primary" @click="save">保存（按当前规则 v{{ rule?.version }} 生成报价）</el-button></template>
   </el-dialog>
   <ImportDialog v-if="editable" v-model="importDlg" @imported="onImported" />
   <el-dialog v-model="shotDlg" title="资产截图" width="720px">
-    <el-image v-for="(u, i) in shots" :key="i" :src="u" :preview-src-list="shots" style="width:200px;height:150px;margin:4px" fit="cover" />
+    <AttachmentGallery :attachments="shots" :width="200" :height="150" @expired="reloadShots" />
   </el-dialog>
 </template>
 <script setup lang="ts">
@@ -108,7 +112,8 @@ import { useRoute } from 'vue-router'
 import type { FormInstance } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { api } from '../../api'
-import { dicts, type PricingRule } from '../../config/rules'
+import type { PricingRule } from '../../config/rules'
+import { dicts } from '../../config/dictStore'
 import { parsePricingText } from '../../domain/parsePricingText'
 import { ACCOUNT_SOURCE_LABEL, ACCOUNT_STATUS_LABEL, type AccountAdminView as Account, type AccountInput, type AccountSource, type AccountStatus } from '../../domain/types'
 import { can } from '../../domain/permissions'
@@ -117,6 +122,16 @@ import type { UploadUserFile } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import type { Attachment, NewAttachment } from '../../domain/types'
 import ImportDialog from './ImportDialog.vue'
+import AttachmentGallery from '../../components/AttachmentGallery.vue'
+import { freshAttachments } from '../../api/attachments'
+const editingRuleVersion = ref<number | null>(null)
+/** 截图地址过期且无法单独续签时：重新拉库存列表（会带新签名），再刷新弹窗里的截图 */
+async function reloadShots() {
+  const ids = new Set(shots.value.map((x) => x.id))
+  await load()
+  const a = list.value.find((x) => x.attachments.some((y) => ids.has(y.id)))
+  if (a) shots.value = a.attachments
+}
 
 const route = useRoute()
 const list = ref<Account[]>([])
@@ -129,7 +144,7 @@ const editable = can(user?.role, 'inventoryEdit')
 const canOrder = can(user?.role, 'orders')
 const source = ref<string>((route.query.source as string) || '')
 const shotDlg = ref(false)
-const shots = ref<string[]>([])
+const shots = ref<Attachment[]>([])
 const transitions: Record<AccountStatus, AccountStatus[]> = { draft: ['listed', 'off'], listed: ['off'], off: ['listed'], held: ['listed', 'off'], rented: [], settling: [] }
 const actionLabel = (from: AccountStatus, to: AccountStatus) => to === 'listed' ? (from === 'off' ? '重新上架' : from === 'draft' ? '人工确认上架' : '入库后上架') : from === 'draft' ? '作废' : '下架'
 const newStatuses: AccountStatus[] = ['draft', 'listed', 'off', 'held']
@@ -162,11 +177,12 @@ async function collectShots(): Promise<(Attachment | NewAttachment)[]> {
   return out
 }
 function openNew() { Object.keys(form).forEach((k) => delete (form as any)[k]); Object.assign(form, blank()); pasteText.value = ''; shotFiles.value = []; dlg.value = true }
-function openEdit(a: Account) {
+async function openEdit(a: Account) {
   Object.keys(form).forEach((k) => delete (form as any)[k])
   const { accountNo, quote, createdAt, updatedAt, deleted, cumulativeIncome, paybackPercent, ownerName, ...rest } = JSON.parse(JSON.stringify(a))
   Object.assign(form, rest)
-  shotFiles.value = (a.attachments ?? []).map((x) => ({ name: x.name, url: x.dataUrl, uid: Date.now() + Math.random(), status: 'success', att: x }))
+  editingRuleVersion.value = a.quote.ruleVersion
+  shotFiles.value = (await freshAttachments(a.attachments)).map((x) => ({ name: x.name, url: x.dataUrl, uid: Date.now() + Math.random(), status: 'success', att: x }))
   editingNo.value = accountNo
   dlg.value = true
 }
