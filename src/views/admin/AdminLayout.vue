@@ -8,7 +8,7 @@
     </el-aside>
     <el-container>
       <el-header class="hdr">
-        <span class="muted">三角洲行动 · 账号租赁与回收估值（内部 v0.2）</span>
+        <span class="muted">三角洲行动 · 账号租赁与回收估值（内部 v{{ appVersion }}）</span>
         <div class="row-gap">
           <router-link to="/accounts">前台大厅 ↗</router-link>
           <router-link v-if="user && can(user.role, 'ownerPortalAll')" to="/owner/accounts">号主门户 ↗</router-link>
@@ -23,6 +23,7 @@
   </el-container>
 </template>
 <script setup lang="ts">
+const appVersion = __APP_VERSION__
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'

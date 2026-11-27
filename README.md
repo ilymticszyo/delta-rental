@@ -48,6 +48,7 @@ npm run build        # mock 构建 → dist/（Pages）
 npm run build:prod   # http 构建 → dist/（服务器）
 npx vite preview --port 4173 &
 node scripts/smoke.mjs http://localhost:4173/ shots   # 端到端点击测试（Playwright + 系统 Chrome）
+node scripts/e2e-roles.mjs http://localhost:4175/ shots-roles   # 六个角色逐页点遍：页面报错、错误提示、坏图、非预期 4xx/5xx、号主隔离
 ```
 
 ### 对真实后端跑契约测试
