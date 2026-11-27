@@ -14,11 +14,11 @@ export const config = {
   uploadDir: path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads')),
   adminUsername: process.env.ADMIN_USERNAME || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || 'admin123',
-  enableDemoAccounts: flag('ENABLE_DEMO_ACCOUNTS', true),
+  enableDemoAccounts: flag('DEMO', flag('ENABLE_DEMO_ACCOUNTS', true)),
   enableDemoReset: flag('ENABLE_DEMO_RESET', true),
-  corsOrigin: (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean),
-  cookieSecure: flag('COOKIE_SECURE', false),
   nodeEnv: process.env.NODE_ENV || 'development',
+  sessionSlideMs: Number(process.env.SESSION_SLIDE_HOURS || 12) * 3600000,
+  sessionAbsoluteMs: Number(process.env.SESSION_ABSOLUTE_DAYS || 7) * 86400000,
 }
 
 export function assertConfig() {

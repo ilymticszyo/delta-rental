@@ -1,5 +1,13 @@
+export interface FieldError { field: string; message: string }
+
 export class ApiError extends Error {
-  constructor(message: string, public code = 400, public persist = false) {
+  constructor(
+    message: string,
+    public code = 400,
+    public persist = false,
+    public errorCode?: string,
+    public fields?: FieldError[],
+  ) {
     super(message)
     this.name = 'ApiError'
   }

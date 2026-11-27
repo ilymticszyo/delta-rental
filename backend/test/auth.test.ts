@@ -77,7 +77,7 @@ describe('五档权限', () => {
     assert.equal(a.ownerContact, undefined)
     assert.equal(a.costAmount, undefined)
     const ownerList = eng.listListedAccounts(db, as('owner1'))
-    assert.ok(ownerList.every((x) => x.quote === null && x.ownerContact === undefined))
+    assert.ok(ownerList.every((x) => x.quote === null && x.ownerContact === undefined && x.deposit === undefined && x.coinRatio === undefined))
     const p = eng.calcPricing(db, as('owner1'), pricingInput)
     assert.deepEqual(Object.keys(p).sort(), ['ownerSettlement', 'ruleVersion'])
   })
@@ -112,7 +112,8 @@ describe('订单、押金与号主应付', () => {
     assert.equal(preview.blocked, true)
     assert.throws(() => eng.createOrder(db, as('cs'), { accountId: acc.id, renterContact: 'wx_black_ahu', startAt: new Date(NOW).toISOString(), rentalDays: 3, deposit: 0, extraFee: 0, remark: '' }), (e: unknown) => {
       assert.ok(e instanceof ApiError)
-      assert.equal(e.code, 403)
+      assert.equal(e.code, 409)
+      assert.equal(e.errorCode, 'RENTER_BLACKLISTED')
       assert.equal(e.persist, true)
       return true
     })
@@ -156,6 +157,27 @@ describe('订单、押金与号主应付', () => {
     assert.equal(acc.status, 'listed')
     assert.ok(db.payables.some((p) => p.orderId === order.id && p.type === 'reverse'))
     assert.equal(order.deposits.some((d) => d.type === 'refund'), true)
+  })
+  it('Q8：租期只改到期日，不改租金；天数来自周期字典且不参与金额', () => {
+    const { db, eng, as } = setup()
+    const cs = as('cs')
+    const acc = db.accounts.find((a) => a.status === 'listed' && a.source === 'consign')!
+    const quoteRent = acc.quote.coinRent
+    const quoteDays = acc.quote.rentalDays
+    const startAt = new Date(NOW).toISOString()
+    const order = eng.createOrder(db, cs, { accountId: acc.id, renterContact: 'wx_q8', startAt, rentalDays: quoteDays + 9, deposit: 0, extraFee: 40, remark: '' })
+    assert.equal(order.coinRent, quoteRent)
+    assert.equal(order.rentalDays, quoteDays + 9)
+    assert.equal(order.extraFee, 40)
+    assert.equal(order.totalAmount, quoteRent + 40)
+    assert.equal(order.ownerPayable, acc.source === 'consign' ? acc.quote.ownerSettlement : 0)
+    assert.equal(order.endAt, new Date(new Date(startAt).getTime() + (quoteDays + 9) * 86400000).toISOString())
+    const extended = eng.extendOrder(db, cs, order.id, 2, '只改期')
+    assert.equal(extended.coinRent, quoteRent)
+    assert.equal(extended.extraFee, 40)
+    assert.equal(extended.totalAmount, quoteRent + 40)
+    assert.equal(extended.rentalDays, 2)
+    assert.equal(extended.ownerPayable, order.ownerPayable)
   })
   it('熟客登记免押金', () => {
     const { db, eng, as } = setup()

@@ -220,6 +220,18 @@ export class Engine {
     if (!can(u.role, 'inventoryView') && a.status !== 'listed') return undefined
     return lobbyAccountFor(u.role, clone(a))
   }
+  pricingOptions(db: Db, user: User | null) {
+    this.need(user, 'front')
+    const r = db.pricingRule
+    return {
+      version: r.version,
+      channels: Object.keys(r.channelFeeRates),
+      cycles: Object.keys(r.cycleValues),
+      customDiscountMin: r.customDiscountMin,
+      customDiscountMax: r.customDiscountMax,
+      defaultDeposit: r.defaultDeposit,
+    }
+  }
   calcPricing(db: Db, user: User | null, input: PricingInput) {
     const u = this.need(user, 'front')
     const regular = this.renterTag(db, input.renterContact) === 'regular'
@@ -292,7 +304,7 @@ export class Engine {
     const q = pricing(toPricingInput(this.ownerAccountInput(db, u.ownerId!, asset, '', '')), db.pricingRule)
     return { takeHome: q.ownerSettlement, ruleVersion: q.ruleVersion }
   }
-  async ownerSubmitListing(db: Db, user: User | null, input: { asset: ValuationInput; assistTime: string; remark: string; attachments: { name: string; dataUrl: string }[]; fromRecycleId?: string }, store?: DiskAttachmentStore) {
+  async ownerSubmitListing(db: Db, user: User | null, input: { asset: ValuationInput; assistTime: string; remark: string; attachments: { name: string; dataUrl: string; id?: string }[]; fromRecycleId?: string }, store?: DiskAttachmentStore) {
     const u = this.need(user, 'ownerPortal')
     let asset = input.asset
     if (input.fromRecycleId) {
@@ -307,7 +319,7 @@ export class Engine {
     const acc = this.ownerAccountInput(db, u.ownerId!, asset, input.assistTime, input.remark)
     this.bumpAccountSeq(db)
     const t = this.nowIso()
-    const shots = await persistShots(input.attachments.map((x, i) => ({ ...x, id: `f${db.seq.account}-${i}` })), store, u.username, t)
+    const shots = await persistShots(input.attachments.map((x, i) => ({ ...x, id: x.id || `f${db.seq.account}-${i}` })), store, u.username, t)
     const a: Account = { ...acc, id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote: pricing(toPricingInput(acc), db.pricingRule), attachments: shots, createdAt: t, updatedAt: t }
     db.accounts.unshift(a)
     this.audit(db, u, '号主上架', `${a.accountNo}（待确认）${input.fromRecycleId ? '复用回收估值' : ''}`)
@@ -357,10 +369,10 @@ export class Engine {
   }
   importAccounts(db: Db, user: User | null, aoa: unknown[][], fileName: string) {
     const actor = this.need(user, 'inventoryEdit')
-    if (!Array.isArray(aoa)) throw new ApiError('导入数据格式错误')
-    if (aoa.length - 1 > IMPORT_MAX_ROWS) throw new ApiError(`单次最多导入 ${IMPORT_MAX_ROWS} 行`)
+    if (!Array.isArray(aoa)) throw new ApiError('导入数据格式错误', 422, false, 'IMPORT_INVALID_FILE')
+    if (aoa.length - 1 > IMPORT_MAX_ROWS) throw new ApiError(`单次最多导入 ${IMPORT_MAX_ROWS} 行`, 422, false, 'IMPORT_INVALID_FILE')
     const parsed = parseImport(aoa, this.importCtx(db))
-    if (parsed.headerErrors.length) throw new ApiError(parsed.headerErrors.join('；'))
+    if (parsed.headerErrors.length) throw new ApiError(parsed.headerErrors.join('；'), 422, false, 'IMPORT_INVALID_FILE')
     const t = this.nowIso()
     const imported: string[] = []
     for (const row of parsed.rows) {
@@ -375,6 +387,20 @@ export class Engine {
     const skipped = parsed.rows.filter((r) => r.errors.length).map((r) => ({ rowNo: r.rowNo, accountNo: r.accountNo, errors: r.errors }))
     this.audit(db, actor, '批量导入', `${fileName}：导入 ${imported.length} 条（待确认）${imported.length ? '：' + imported.slice(0, 20).join('、') + (imported.length > 20 ? ' 等' : '') : ''}；跳过 ${skipped.length} 条${skipped.length ? '（第 ' + skipped.map((x) => x.rowNo).join('、') + ' 行）' : ''}`)
     return { imported, skipped, operator: actor.username }
+  }
+  /** dryRun：不入库，文件级错误仍抛 IMPORT_INVALID_FILE */
+  previewImport(db: Db, user: User | null, aoa: unknown[][]) {
+    this.need(user, 'inventoryEdit')
+    if (!Array.isArray(aoa)) throw new ApiError('导入数据格式错误', 422, false, 'IMPORT_INVALID_FILE')
+    if (aoa.length - 1 > IMPORT_MAX_ROWS) throw new ApiError(`单次最多导入 ${IMPORT_MAX_ROWS} 行`, 422, false, 'IMPORT_INVALID_FILE')
+    const parsed = parseImport(aoa, this.importCtx(db))
+    if (parsed.headerErrors.length) throw new ApiError(parsed.headerErrors.join('；'), 422, false, 'IMPORT_INVALID_FILE')
+    return {
+      headerErrors: [] as string[],
+      rows: parsed.rows.map((r) => ({ rowNo: r.rowNo, accountNo: r.accountNo, errors: r.errors })),
+      valid: parsed.valid,
+      invalid: parsed.invalid,
+    }
   }
   deleteAccount(db: Db, user: User | null, id: string) {
     const actor = this.need(user, 'inventoryEdit')
@@ -411,7 +437,7 @@ export class Engine {
   createOrder(db: Db, user: User | null, input: OrderInput) {
     const actor = this.need(user, 'orders')
     const a = this.findAccount(db, input.accountId)
-    if (a.status !== 'listed') throw new ApiError(`账号 ${a.accountNo} 当前为「${ACCOUNT_STATUS_LABEL[a.status]}」，不能登记订单`, 409)
+      if (a.status !== 'listed') throw new ApiError(`账号 ${a.accountNo} 当前为「${ACCOUNT_STATUS_LABEL[a.status]}」，不能登记订单`, 409, false, 'ACCOUNT_NOT_AVAILABLE')
     if (db.orders.some((o) => o.accountId === a.id && (o.status === 'active' || o.status === 'settling')))
       throw new ApiError('该账号已有进行中的订单', 409)
     if (!input.renterContact.trim()) throw new ApiError('请填写租客联系方式')
@@ -419,7 +445,7 @@ export class Engine {
     if (tag === 'blacklist') {
       const r = db.renters.find((x) => norm(x.contact) === norm(input.renterContact))
       this.audit(db, actor, '拦截黑名单', `${input.renterContact.trim()} 尝试租 ${a.accountNo}`)
-      throw new ApiError(`该租客在黑名单中，禁止登记${r?.note ? `（${r.note}）` : ''}`, 403, true)
+      throw new ApiError(`该租客在黑名单中，禁止登记${r?.note ? `（${r.note}）` : ''}`, 409, true, 'RENTER_BLACKLISTED')
     }
     if (!(input.rentalDays >= 1)) throw new ApiError('租期至少 1 天')
     if (input.deposit < 0 || input.extraFee < 0) throw new ApiError('金额不能为负')
@@ -510,8 +536,8 @@ export class Engine {
   completeOrder(db: Db, user: User | null, id: string, relist: boolean, note = '') {
     return this.orderOp(db, user, id, (o, u) => {
       if (o.status !== 'settling') throw new ApiError('只有待结算的订单可以完成')
-      if (depositBalance(o) !== 0 && !note.trim()) throw new ApiError('押金余额不为 0，请先处理或填写不退还原因')
-      if (this.orderPayableBalance(db, o) !== 0 && !note.trim()) throw new ApiError('号主应付未结清，请先付款或填写说明（如月结）')
+      if (depositBalance(o) !== 0 && !note.trim()) throw new ApiError('押金余额不为 0，请先处理或填写不退还原因', 409, false, 'BALANCE_NOT_SETTLED')
+      if (this.orderPayableBalance(db, o) !== 0 && !note.trim()) throw new ApiError('号主应付未结清，请先付款或填写说明（如月结）', 409, false, 'BALANCE_NOT_SETTLED')
       o.status = 'done'
       if (note) o.remark = [o.remark, `结算：${note}`].filter(Boolean).join('；')
       const a = db.accounts.find((x) => x.id === o.accountId)
@@ -640,6 +666,7 @@ export class Engine {
   }
   savePricingRule(db: Db, user: User | null, rule: PricingRule, summary = '') {
     const u = this.need(user, 'rulesEdit')
+    if (rule.version !== db.pricingRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
     db.pricingRule = { ...clone(rule), version: db.pricingRule.version + 1 }
     db.pricingHistory.unshift({ version: db.pricingRule.version, savedAt: this.nowIso(), savedBy: u.username, summary: summary || '修改计价规则', rule: clone(db.pricingRule) })
     this.audit(db, u, '计价规则', `保存为 v${db.pricingRule.version} ${summary}`)
@@ -651,6 +678,7 @@ export class Engine {
   }
   saveValuationRule(db: Db, user: User | null, rule: ValuationRule, summary = '') {
     const u = this.need(user, 'rulesEdit')
+    if (rule.version !== db.valuationRule.version) throw new ApiError('规则版本已变化，请刷新后重试', 409, false, 'VERSION_CONFLICT')
     db.valuationRule = { ...clone(rule), version: db.valuationRule.version + 1 }
     db.valuationHistory.unshift({ version: db.valuationRule.version, savedAt: this.nowIso(), savedBy: u.username, summary: summary || `市场系数 ${db.valuationRule.marketCoefficient}`, rule: clone(db.valuationRule) })
     this.audit(db, u, '估值依据', `保存为 v${db.valuationRule.version} ${summary}`)
@@ -694,9 +722,11 @@ export class Engine {
   dashboard(db: Db, user: User | null, now = new Date(this.clock())): DashboardStats {
     this.need(user, 'dashboard')
     const acc = db.accounts.filter((a) => !a.deleted)
-    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-    const startWeek = startToday - ((now.getDay() + 6) % 7) * DAY
-    const startMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+    // 「今日 / 本周 / 本月」按 Asia/Shanghai（无夏令时，UTC+8），周一为一周起点
+    const shifted = new Date(now.getTime() + 8 * 3600000)
+    const startToday = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - 8 * 3600000
+    const startWeek = startToday - ((shifted.getUTCDay() + 6) % 7) * DAY
+    const startMonth = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - 8 * 3600000
     const valid = db.orders.filter((o) => o.status !== 'cancelled')
     const ts = (o: RentalOrder) => new Date(o.createdAt).getTime()
     const rev = (os: RentalOrder[]) => os.reduce((s, o) => s + o.coinRent + o.extraFee, 0)
@@ -723,8 +753,8 @@ export class Engine {
     const me = this.need(user, 'staff')
     const u = db.users.find((x) => x.username === username)
     if (!u) throw new ApiError('用户不存在', 404)
-    if (!enabled && u.role === 'admin' && db.users.filter((x) => x.role === 'admin' && x.enabled).length <= 1) throw new ApiError('不能停用最后一个管理员')
-    if (!enabled && u.username === me.username) throw new ApiError('不能停用自己')
+      if (!enabled && u.role === 'admin' && db.users.filter((x) => x.role === 'admin' && x.enabled).length <= 1) throw new ApiError('不能停用最后一个管理员', 409, false, 'LAST_ADMIN')
+      if (!enabled && u.username === me.username) throw new ApiError('不能停用自己', 409, false, 'LAST_ADMIN')
     u.enabled = enabled
     this.audit(db, me, '员工启停', `${username} ${enabled ? '启用' : '停用'}`)
     return { ...toPublicUser(u), enabled: u.enabled }

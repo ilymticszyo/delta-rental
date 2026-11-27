@@ -98,7 +98,10 @@ export interface AccountAdminView extends Account {
 }
 
 /** 前台大厅 / 详情视图：按角色裁剪字段 */
-export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount'> & {
+export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount' | 'deposit' | 'coinRatio' | 'discountMode'> & {
+  deposit?: number
+  coinRatio?: number
+  discountMode?: Account['discountMode']
   quote: Partial<PricingResult> | null
   ownerContact?: string
   ownerId?: string

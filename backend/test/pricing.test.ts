@@ -53,6 +53,23 @@ describe('出租计价（PRD 7.1）', () => {
     assert.equal(r.discountPercent, 95)
     assert.equal(r.regularDiscountApplied, false)
   })
+  it('Q8：周期只决定天数，不改变租金；固定天数模式同样不折算租金', () => {
+    const slow = calcPricing(base, defaultPricingRule)
+    const fast = calcPricing({ ...base, cycle: '5M/天' }, defaultPricingRule)
+    assert.equal(slow.coinRent, fast.coinRent)
+    assert.equal(slow.originalCoinRent, 500)
+    assert.equal(slow.rentalDays, 10)
+    assert.equal(fast.rentalDays, 20)
+    assert.equal(slow.ownerSettlement, slow.coinRent - slow.serviceFee)
+    assert.equal(slow.renterRent, slow.coinRent + slow.extraFee)
+    assert.equal(slow.totalAmount, slow.renterRent + slow.deposit)
+    const fixed = calcPricing(base, { ...defaultPricingRule, dayCalcMode: 'fixedDays', cycleValues: { ...defaultPricingRule.cycleValues, '10M/天': 3 } })
+    assert.equal(fixed.coinRent, slow.coinRent)
+    assert.equal(fixed.rentalDays, 3)
+    const tiny = calcPricing({ ...base, coinAmount: 3 }, defaultPricingRule)
+    assert.equal(tiny.rentalDays, 1)
+    assert.equal(tiny.originalCoinRent, Math.round((3 * 100) / 20))
+  })
   it('熟客 multiply：在系统档基础上再乘', () => {
     const rule = { ...defaultPricingRule, triggerMetric: 'totalAssets' as const, regularMode: 'multiply' as const }
     const r = calcPricing({ ...base, renterRegular: true }, rule)

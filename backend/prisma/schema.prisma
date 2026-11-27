@@ -113,5 +113,34 @@ model Upload {
   relPath    String
   bytes      Int
   uploadedBy String
+  accountId  String?
   createdAt  DateTime
+
+  @@index([uploadedBy])
+  @@index([accountId])
+}
+
+/// 不透明 Bearer 令牌，只存哈希。12 小时滑动续期，绝对上限 7 天。
+model Session {
+  tokenHash         String   @id
+  username          String
+  createdAt         DateTime
+  lastSeenAt        DateTime
+  expiresAt         DateTime
+  absoluteExpiresAt DateTime
+
+  @@index([username])
+}
+
+/// Idempotency-Key：同一用户、同一路径、同一请求体 24 小时内重放响应。
+model IdempotencyRecord {
+  id         String   @id
+  username   String
+  route      String
+  bodyHash   String
+  statusCode Int
+  body       Json
+  createdAt  DateTime
+
+  @@index([createdAt])
 }

@@ -230,15 +230,15 @@ rented / settling 不能人工改、不能删除、不能编辑状态字段（`P
 - 契约测试：`npm run test:contract`。它检查：每个前端方法打到契约里的方法 + 路径、查询参数已声明、请求体与响应都通过 openapi schema 校验、契约里每个操作都被客户端用到、号主响应深度扫描无禁用字段、错误 / 401 / 超时 / 网络错误映射。`tests/contract/fakeBackend.ts` 的路由表同时就是一份可执行的“参考语义”。
 - 后端回归建议：后端用 openapi.yaml 做响应校验中间件（或 schemathesis 之类工具），并把 `tests/pricing|valuation|import.test.ts` 的用例移植过去。
 
-## 12. 待后端确认的问题
+## 12. 已确认的决定
 
-1. **鉴权方式**：前端按 Bearer + localStorage 实现。若后端坚持 HttpOnly Cookie 会话，需约定 Cookie 名、`SameSite=Lax`、CSRF 头（前端已固定发送 `X-Requested-With: XMLHttpRequest`），前端改动很小。
-2. **截图存储与 URL**：本地磁盘还是阿里云 OSS？签名 URL 的有效期？号主访问截图的鉴权方式？
-3. **分页落地时机**：前端目前拉全量（每页 200）。订单、日志预计多大量级？是否首版就改服务端分页 + 筛选？
-4. **改规则后是否批量重算现有账号报价**（mock 不重算，需逐个编辑）？还是提供“按新规则重算全部空闲账号”的接口？
-5. **号主账号体系**：号主用户如何创建、如何与号主档案（`OwnerProfile.userId`）绑定？是否需要员工新建 / 重置密码接口（目前契约只有启用 / 停用）？
-6. **字典与客服排班**：字典（大区、段位、皮肤…）与客服排班目前是只读种子，是否首版就要管理接口？
-7. **幂等**：登记订单、导入、付号主款是否支持 `Idempotency-Key`，防止双击 / 重试重复入账？
-8. **订单时间与租金口径**：`startAt` 由客服填写，`endAt = startAt + rentalDays × 24h`（mock 口径）。mock 里订单的 `rentalDays` 只决定到期时间，租金固定取账号报价（按账号周期算出的一个租期）；改租期也不重算租金。这是 PRD 的意图吗？还是租金应随天数折算？
-9. **导入上限**：500 行 / 次、5 MB 请求体是否合适？
-10. **`/orders/{id}`** 详情接口前端暂未用（列表已带 events / deposits），后端可以先不做，或做了方便后续大列表瘦身。
+1. **鉴权**：不透明 Bearer 令牌（≥128 位随机，服务端只存 SHA-256）。12 小时滑动续期，绝对最长 7 天。退出、停用用户立即吊销该用户全部令牌。不用 JWT，也不下发 Cookie。无效或过期 → 401 `UNAUTHENTICATED`。登录失败统一 `401 INVALID_CREDENTIALS`；停用账号登录 `403 USER_DISABLED`。
+2. **截图**：存在本机磁盘（compose 卷 `uploads`）。`url` 为 HMAC 签名地址 `/api/uploads/{id}/content?exp=&sig=`，有效期 1 小时，列表接口每次重签。`<img>` 不带 Authorization。号主只能把**自己上传且未绑定**的 id，或该账号已有的 id，绑到自己的号。
+3. **分页**：首版就做服务端分页。`page` / `pageSize`（默认 50，最大 200，超出按 200）。前端可以继续用 `pageSize=200` 翻页拉全量。
+4. **改规则不自动重算**已有库存报价。每条报价快照保留自己的 `ruleVersion`。不提供批量重算接口（留给以后单独做）。
+5. **号主登录**：用户行带 `ownerId`，与号主档案 1:1（种子里 owner1↔ow1、owner2↔ow2）。`GET /staff` 返回该字段。契约目前只有启用 / 停用，没有新建用户或重置密码的操作，因此首版不另加接口；要做新建需先补 openapi。
+6. **字典与客服排班**：只读。字典走 `GET /accounts/import/context` 与 `GET /pricing/options`，排班走 `GET /cs-agents`。管理接口以后再加。
+7. **幂等**：`POST /orders`、`POST /accounts/import`、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`。同一用户、同一路径、同一请求体在 24 小时内重放当时的响应；同一把钥匙配不同请求体 → 409 `DUPLICATE`。
+8. **租金与租期（产品已确认，沿用演示 / PRD 第 7 章）**：租金按纯币和比例计算，**天数不参与金额**。默认天数 = `max(1, floor(纯币 M / 周期字典的 M/天))`；固定天数模式下周期值就是天数。租客应付 = 折后租金 + 附加服务费（默认 0）；总金额 = 应付 + 押金。号主到手 = 折后租金 − 折后租金 × 渠道费率。登记订单时租期、押金、附加费由客服填写（默认带出账号报价，可改）；`coinRent` / `ownerPayable` 由服务端按账号报价锁定。改租期只改 `endAt`，不重算租金。熟客折扣与系统档取更优（`regularMode=best`，可配置为叠乘），熟客免押时押金强制为 0。
+9. **导入上限**：500 行、请求体 5 MB。超过 → 422 `IMPORT_INVALID_FILE` 或 413 `PAYLOAD_TOO_LARGE`。
+10. **`GET /orders/{id}`** 已实现（`x-client-unused`），返回与列表相同的订单视图（含 events、deposits、reminder、ownerPayableBalance）。

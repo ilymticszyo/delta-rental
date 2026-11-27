@@ -124,6 +124,8 @@ export async function wipeDb(tx: Tx) {
   await tx.owner.deleteMany()
   await tx.user.deleteMany()
   await tx.upload.deleteMany()
+  await tx.session.deleteMany()
+  await tx.idempotencyRecord.deleteMany()
   await tx.meta.deleteMany()
 }
 

@@ -1,5 +1,7 @@
 # API 对照
 
+> 已过时。请只看仓库根目录的 `docs/api-contract.md` 与 `docs/openapi.yaml`。下面是接入契约之前的旧草稿。
+
 前端 `src/api/types.ts` 里的每个 `Api` 方法对应一个 HTTP 接口。成功时响应 JSON 就是该方法的返回值（`void` 返回 `{ "ok": true }`，`undefined` / 找不到返回 `null`）。
 
 错误：
