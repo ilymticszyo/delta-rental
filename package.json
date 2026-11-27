@@ -14,7 +14,8 @@
     "element-plus": "^2.14.8",
     "qrcode": "^1.5.4",
     "vue": "^3.5.46",
-    "vue-router": "^4.6.5"
+    "vue-router": "^4.6.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.6",

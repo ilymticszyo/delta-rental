@@ -11,7 +11,11 @@
       <span class="muted">共 {{ rows.length }} 个；自收成本合计 ¥{{ rows.reduce((s, a) => s + (a.source === 'buyin' ? a.costAmount : 0), 0) }}，累计收入 ¥{{ rows.reduce((s, a) => s + a.cumulativeIncome, 0) }}</span>
       <div style="flex:1" />
       <el-tag v-if="!editable" type="info">客服：只读查看</el-tag>
-      <el-button v-if="editable" type="primary" @click="openNew">新增账号</el-button>
+      <template v-if="editable">
+        <el-button :loading="tplLoading" @click="downloadTpl">下载模板</el-button>
+        <el-button @click="importDlg = true">批量导入</el-button>
+        <el-button type="primary" @click="openNew">新增账号</el-button>
+      </template>
     </div>
     <el-table :data="rows" border size="small">
       <el-table-column prop="accountNo" label="编号" width="90" />
@@ -88,6 +92,7 @@
       <el-image v-for="x in form.attachments" :key="x.id" :src="x.dataUrl" :preview-src-list="form.attachments.map((y) => y.dataUrl)" style="width:80px;height:60px;margin-right:6px" fit="cover" /></div>
     <template #footer><el-button @click="dlg = false">{{ editable ? '取消' : '关闭' }}</el-button><el-button v-if="editable" type="primary" @click="save">保存（按当前规则生成报价）</el-button></template>
   </el-dialog>
+  <ImportDialog v-if="editable" v-model="importDlg" @imported="onImported" />
   <el-dialog v-model="shotDlg" title="资产截图" width="720px">
     <el-image v-for="(u, i) in shots" :key="i" :src="u" :preview-src-list="shots" style="width:200px;height:150px;margin:4px" fit="cover" />
   </el-dialog>
@@ -103,6 +108,7 @@ import { parsePricingText } from '../../domain/parsePricingText'
 import { ACCOUNT_SOURCE_LABEL, ACCOUNT_STATUS_LABEL, type AccountAdminView as Account, type AccountInput, type AccountSource, type AccountStatus } from '../../domain/types'
 import { can } from '../../domain/permissions'
 import { fmtTime, run, statusTagType } from '../../utils'
+import ImportDialog from './ImportDialog.vue'
 
 const route = useRoute()
 const list = ref<Account[]>([])
@@ -160,5 +166,13 @@ async function save() {
 async function setStatus(a: Account, s: AccountStatus) { if (await run(() => api.setAccountStatus(a.id, s), '状态已更新')) await load() }
 async function del(a: Account) { await run(() => api.deleteAccount(a.id), '已删除'); await load() }
 async function load() { list.value = await api.listAccounts() }
+const importDlg = ref(false)
+const tplLoading = ref(false)
+async function downloadTpl() {
+  tplLoading.value = true
+  try { const { downloadTemplate } = await import('../../domain/importXlsx'); await downloadTemplate(await api.importContext()) }
+  catch (e: any) { ElMessage.error(e?.message ?? String(e)) } finally { tplLoading.value = false }
+}
+async function onImported() { status.value = 'draft'; source.value = ''; kw.value = ''; await load() }
 onMounted(async () => { rule.value = await api.getPricingRule(); await load() })
 </script>

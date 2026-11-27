@@ -2,10 +2,11 @@
 import { chromium } from 'playwright'
 import fs from 'node:fs'
 import path from 'node:path'
+import * as XLSX from 'xlsx'
 const [url = 'http://localhost:4173/', dir = 'shots'] = process.argv.slice(2)
 fs.mkdirSync(dir, { recursive: true })
 const browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', args: ['--no-sandbox'] })
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true })
 const page = await ctx.newPage()
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
@@ -138,6 +139,7 @@ await check('客服库存只读：有成本 / 回本，无新增与编辑', asyn
   await page.waitForSelector('text=客服：只读查看')
   await page.waitForSelector('.el-table__header >> text=回本进度')
   if (await page.locator('button:has-text("新增账号")').count()) throw new Error('客服不应能新增')
+  if (await page.locator('button:has-text("下载模板"), button:has-text("批量导入")').count()) throw new Error('客服不应看到导入入口')
   await shot('10-cs-inventory')
 })
 await check('登记订单：黑名单拦截', async () => {
@@ -217,6 +219,71 @@ await check('运营：人工确认号主上架的待确认账号', async () => {
   await page.waitForSelector('.el-progress')
   await shot('20-ops-inventory-payback')
 })
+
+// ---------- 运营：Excel 批量导入 ----------
+const tag = 'E2E' + String(Date.now() % 100000).padStart(5, '0')
+const tplPath = path.join(dir, '_template.xlsx'), impPath = path.join(dir, '_import.xlsx')
+await check('运营：库存页「下载模板」得到 .xlsx（每个字段一列 + 示例行 + 填写说明）', async () => {
+  await go('/admin/inventory')
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('button:has-text("下载模板")')])
+  if (!dl.suggestedFilename().endsWith('.xlsx')) throw new Error('文件名：' + dl.suggestedFilename())
+  await dl.saveAs(tplPath)
+  const wb = XLSX.read(fs.readFileSync(tplPath))
+  if (wb.SheetNames.join() !== '账号导入,填写说明') throw new Error('工作表：' + wb.SheetNames)
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets['账号导入'], { header: 1, defval: '' })
+  for (const h of ['账号编号*', '大区*', '段位*', '纯币(M)*', '皮肤', '来源*', '成本(元)']) if (!aoa[0].includes(h)) throw new Error('模板缺列 ' + h)
+  if (aoa.length !== 2) throw new Error('模板应只有表头 + 1 行示例')
+  // 在模板上填：3 行合法 + 4 行有误（缺必填 / 格式 / 文件内重复 / 与库存重复）
+  const H = aoa[0], ex = aoa[1]
+  const mk = (o) => H.map((h, i) => (h.replace('*', '') in o ? o[h.replace('*', '')] : ex[i]))
+  const rows = [H,
+    mk({ 账号编号: tag + 'A', 备注: 'e2e 合法 1' }),
+    mk({ 账号编号: tag + 'B', 来源: '自收', '成本(元)': 900, 号主联系方式: '', 备注: 'e2e 合法 2（自收）' }),
+    mk({ 账号编号: tag + 'C', 大区: '', 备注: 'e2e 缺大区' }),
+    mk({ 账号编号: tag + 'D', '纯币(M)': 'abc', 备注: 'e2e 纯币格式错' }),
+    mk({ 账号编号: tag + 'A', 备注: 'e2e 文件内重复' }),
+    mk({ 账号编号: 'DF10001', 备注: 'e2e 与库存重复' }),
+    mk({ 账号编号: tag + 'E', 皮肤: '', 段位: '巅峰', 备注: 'e2e 合法 3' }),
+  ]
+  const out = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(out, XLSX.utils.aoa_to_sheet(rows), '账号导入')
+  fs.writeFileSync(impPath, XLSX.write(out, { type: 'buffer', bookType: 'xlsx' }))
+})
+await check('上传含好坏行的文件：逐行校验，错误行标红并给出行号与原因', async () => {
+  await page.click('button:has-text("批量导入")')
+  await page.waitForSelector('.import-dialog >> text=下载模板并填写')
+  await page.setInputFiles('.import-upload input[type=file]', impPath)
+  await page.waitForSelector('.import-summary >> text=合法 3 行')
+  await page.waitForSelector('.import-summary >> text=有误 4 行（将跳过）')
+  for (const t of ['第 4 行：「大区」必填', '第 5 行：「纯币(M)」应为非负数字，实际为「abc」', `第 6 行：账号编号「${tag}A」与本文件第 2 行重复`, '第 7 行：账号编号「DF10001」与库存已有账号重复'])
+    await page.waitForSelector(`.import-row-bad .import-errors >> text=${t}`)
+  if ((await page.locator('.import-row-bad').count()) !== 4) throw new Error('标红行数应为 4')
+  const color = await page.locator('.import-errors').first().evaluate((e) => getComputedStyle(e).color)
+  if (color !== 'rgb(245, 108, 108)') throw new Error('错误原因不是红色：' + color)
+  await shot('24-import-validate')
+  await page.click('.import-summary .el-radio-button:has-text("只看有误")')
+  await page.waitForTimeout(300)
+  if ((await page.locator('.import-dialog .el-table__body tr').count()) !== 4) throw new Error('只看有误应为 4 行')
+  await shot('25-import-validate-bad-only')
+})
+await check('确认导入：合法行一次性入库，非法行跳过', async () => {
+  await page.click('.import-dialog button:has-text("确认导入 3 行（跳过 4 行）")')
+  await page.waitForSelector('.import-outcome >> text=已导入 3 个账号（待确认）')
+  await page.waitForSelector('.import-outcome >> text=第 4、5、6、7 行')
+  await shot('26-import-done')
+  await page.click('.import-dialog .el-dialog__footer button:has-text("关闭")')
+})
+await check('导入的账号为「待确认」，确认上架后才可租；操作日志可追溯', async () => {
+  await page.waitForTimeout(500)
+  for (const n of ['A', 'B', 'E']) await page.waitForSelector(`.el-table__row:has-text("${tag}${n}") >> text=待确认`)
+  for (const n of ['C', 'D']) if (await page.locator(`.el-table__row:has-text("${tag}${n}")`).count()) throw new Error(tag + n + ' 不应入库')
+  await page.waitForSelector(`.el-table__row:has-text("${tag}B") >> text=自收`)
+  await shot('27-import-pending-accounts')
+  await go('/admin/inventory?kw=' + tag + 'A')
+  await page.locator(`.el-table__row:has-text("${tag}A")`).first().locator('button:has-text("状态")').click()
+  await page.locator('.el-dropdown-menu:visible li:has-text("人工确认上架")').click()
+  await page.waitForSelector('text=状态已更新')
+  await page.waitForSelector(`.el-table__row:has-text("${tag}A") >> text=空闲可租`)
+})
 await check('运营不能看员工与日志', async () => {
   await go('/admin/audit')
   await page.waitForSelector('text=无权限（403）')
@@ -230,6 +297,8 @@ await check('管理员：员工与角色、操作日志、号主门户全部', a
   await shot('21-admin-staff')
   await go('/admin/audit')
   await page.waitForSelector('text=租客标签')
+  await page.waitForSelector('text=批量导入')
+  await page.waitForSelector(`text=导入 3 条（待确认）`)
   await page.waitForSelector('text=估值依据')
   await shot('22-admin-audit')
   await go('/owner/accounts')
@@ -246,7 +315,7 @@ await check('角色切换器可切到号主', async () => {
 })
 
 await browser.close()
-fs.rmSync(png, { force: true })
+for (const f of [png, tplPath, impPath]) fs.rmSync(f, { force: true })
 for (const r of results) console.log(r.join(' | '))
 const uniq = [...new Set(errors)]
 if (uniq.length) console.log('console errors:', uniq)

@@ -1,3 +1,4 @@
+import type { ImportContext } from '../domain/importAccounts'
 // API 抽象层：页面只依赖这个接口。当前实现为 localStorage（src/api/local.ts），
 // 接后端时新增一个 http 实现（同域 /api），在 src/api/index.ts 切换即可。
 // 鉴权与字段裁剪在实现层完成（模拟后端），不只靠前端藏菜单。
@@ -12,6 +13,8 @@ import type { AuditLog } from '../mock/seed'
 export type { AuditLog }
 
 export type OrderView = RentalOrder & { reminder: 'expiring' | 'overdue' | null; ownerPayableBalance: number }
+export interface ImportOutcome { imported: string[]; skipped: { rowNo: number; accountNo: string; errors: string[] }[]; operator: string }
+
 export interface OrderPreview {
   profile: RenterProfile | null
   blocked: boolean
@@ -53,6 +56,10 @@ export interface Api {
   // 后台：库存
   listAccounts(): Promise<AccountAdminView[]>
   saveAccount(input: AccountInput): Promise<AccountAdminView>
+  /** 批量导入的校验上下文（字典 + 已有编号）；仅运营 / 管理员 */
+  importContext(): Promise<ImportContext>
+  /** 批量导入：服务端重新逐行校验，合法行以「待确认」入库，非法行跳过；记操作日志 */
+  importAccounts(aoa: unknown[][], fileName: string): Promise<ImportOutcome>
   deleteAccount(id: string): Promise<void>
   setAccountStatus(id: string, status: AccountStatus): Promise<AccountAdminView>
 

@@ -1,5 +1,6 @@
 // localStorage 实现：模拟后端。算价 / 估值 / 状态流转 / 鉴权 / 字段裁剪全部在这一层执行。
-import type { PricingRule, ValuationRule } from '../config/rules'
+import { dicts, type PricingRule, type ValuationRule } from '../config/rules'
+import { IMPORT_MAX_ROWS, parseImport, type ImportContext } from '../domain/importAccounts'
 import { calcPricing } from '../domain/pricing'
 import { can, type Cap } from '../domain/permissions'
 import { buildReport, platformIncome, type ReportDimension } from '../domain/reports'
@@ -11,7 +12,7 @@ import type {
 } from '../domain/types'
 import { ACCOUNT_STATUS_LABEL, RECYCLE_STATUS_LABEL, RECYCLE_TRANSITIONS, RENTER_TAG_LABEL } from '../domain/types'
 import { buildSeedDb, demoUsers, SEED_VERSION, toPricingInput, type Db, type DbUser } from '../mock/seed'
-import type { Api, DemoAccount, OrderPreview, OrderView, OwnerListingInput } from './types'
+import type { Api, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput } from './types'
 
 const DB_KEY = 'dr:v1:db'
 const SESSION_KEY = 'dr:v1:session'
@@ -21,7 +22,7 @@ export class ApiError extends Error {
   constructor(message: string, public code = 400) { super(message) }
 }
 
-const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
+const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)))
 const nowIso = () => new Date().toISOString()
 const addDays = (iso: string, d: number) => new Date(new Date(iso).getTime() + d * DAY).toISOString()
 const norm = (c: string) => c.trim().toLowerCase()
@@ -71,6 +72,26 @@ export class LocalApi implements Api {
     const u = this.currentUser()
     if (!u) throw new ApiError('未登录', 401)
     return u
+  }
+  /** 自增账号序号，跳过已被导入占用的 DF 编号 */
+  private bumpAccountSeq(db: Db) {
+    const taken = new Set(db.accounts.map((a) => a.accountNo.toUpperCase()))
+    do db.seq.account++; while (taken.has(`DF${db.seq.account}`))
+  }
+  /** 号主寄租：按联系方式关联 / 新建号主档案 */
+  private linkOwner(db: Db, input: AccountInput) {
+    if (input.source !== 'consign' || input.ownerId) return
+    const c = norm(input.ownerContact)
+    let owner = db.owners.find((o) => norm(o.contact) === c)
+    if (!owner && c) { owner = { id: `ow${db.owners.length + 1}-${Date.now() % 10000}`, contact: input.ownerContact.trim(), displayName: input.ownerContact.trim() }; db.owners.push(owner) }
+    input.ownerId = owner?.id
+  }
+  private importCtx(db: Db): ImportContext {
+    return {
+      regions: dicts.regions, loginMethods: dicts.loginMethods, channels: Object.keys(db.pricingRule.channelFeeRates), cycles: Object.keys(db.pricingRule.cycleValues),
+      ranks: dicts.ranks, safeBoxes: dicts.safeBoxes, stamina: dicts.stamina, loads: dicts.loads, skins: dicts.skins.map((x) => x.name),
+      existingNos: db.accounts.map((a) => a.accountNo),
+    }
   }
   private need(cap: Cap): User {
     const u = this.user()
@@ -280,7 +301,7 @@ export class LocalApi implements Api {
       if (input.attachments.length > 5) throw new ApiError('最多上传 5 张截图')
       if (input.attachments.some((x) => x.dataUrl.length > 1_400_000)) throw new ApiError('单张截图不能超过 1MB')
       const acc = this.ownerAccountInput(db, u.ownerId!, asset, input.assistTime, input.remark)
-      db.seq.account++
+      this.bumpAccountSeq(db)
       const t = nowIso()
       const a: Account = {
         ...acc, id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote: calcPricing(toPricingInput(acc), db.pricingRule),
@@ -316,13 +337,7 @@ export class LocalApi implements Api {
     return this.tx((db) => {
       const quote = calcPricing(toPricingInput(input), db.pricingRule)
       const t = nowIso()
-      if (input.source === 'consign' && !input.ownerId) {
-        // 按号主联系方式关联 / 新建号主档案
-        const c = norm(input.ownerContact)
-        let owner = db.owners.find((o) => norm(o.contact) === c)
-        if (!owner && c) { owner = { id: `ow${db.owners.length + 1}-${Date.now() % 10000}`, contact: input.ownerContact.trim(), displayName: input.ownerContact.trim() }; db.owners.push(owner) }
-        input.ownerId = owner?.id
-      }
+      this.linkOwner(db, input)
       if (input.id) {
         const a = this.findAccount(db, input.id)
         if (input.status !== a.status) throw new ApiError('状态请用状态操作按钮修改')
@@ -331,11 +346,40 @@ export class LocalApi implements Api {
         return this.adminView(db, a)
       }
       if (!['draft', 'listed', 'off', 'held'].includes(input.status)) throw new ApiError('新增账号状态只能为草稿 / 空闲可租 / 已下架 / 已回收持有')
-      db.seq.account++
+      this.bumpAccountSeq(db)
       const a: Account = { ...input, attachments: input.attachments ?? [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
       db.accounts.unshift(a)
       this.audit(db, '新增账号', `${a.accountNo}（${ACCOUNT_STATUS_LABEL[a.status]}）`)
       return this.adminView(db, a)
+    })
+  }
+  // ---------- 批量导入（仅运营 / 管理员） ----------
+  async importContext() {
+    this.need('inventoryEdit')
+    return this.importCtx(this.load())
+  }
+  async importAccounts(aoa: unknown[][], fileName: string): Promise<ImportOutcome> {
+    const user = this.need('inventoryEdit')
+    if (!Array.isArray(aoa)) throw new ApiError('导入数据格式错误')
+    if (aoa.length - 1 > IMPORT_MAX_ROWS) throw new ApiError(`单次最多导入 ${IMPORT_MAX_ROWS} 行`)
+    return this.tx((db) => {
+      // 服务端以当前库存重新校验，不信任前端预览结果
+      const parsed = parseImport(aoa, this.importCtx(db))
+      if (parsed.headerErrors.length) throw new ApiError(parsed.headerErrors.join('；'))
+      const t = nowIso()
+      const imported: string[] = []
+      for (const row of parsed.rows) {
+        if (!row.input) continue
+        const { accountNo, ...input } = row.input
+        this.linkOwner(db, input)
+        this.bumpAccountSeq(db)
+        const a: Account = { ...input, status: 'draft', attachments: [], id: `a${db.seq.account}`, accountNo, quote: calcPricing(toPricingInput(input), db.pricingRule), createdAt: t, updatedAt: t }
+        db.accounts.unshift(a)
+        imported.push(accountNo)
+      }
+      const skipped = parsed.rows.filter((r) => r.errors.length).map((r) => ({ rowNo: r.rowNo, accountNo: r.accountNo, errors: r.errors }))
+      this.audit(db, '批量导入', `${fileName}：导入 ${imported.length} 条（待确认）${imported.length ? '：' + imported.slice(0, 20).join('、') + (imported.length > 20 ? ' 等' : '') : ''}；跳过 ${skipped.length} 条${skipped.length ? '（第 ' + skipped.map((x) => x.rowNo).join('、') + ' 行）' : ''}`)
+      return { imported, skipped, operator: user.username }
     })
   }
   async deleteAccount(id: string) {
@@ -611,7 +655,7 @@ export class LocalApi implements Api {
           cycle: db.pricingRule.ownerDefaults.cycle, coinRatio: db.pricingRule.ownerDefaults.coinRatio,
           discountMode: 'system', deposit: db.pricingRule.defaultDeposit, remark: `回收入库，来源 ${r.requestNo}，成交价 ${r.staffPrice} 元`,
         }
-        db.seq.account++
+        this.bumpAccountSeq(db)
         a = { ...input, attachments: [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote: calcPricing(toPricingInput(input), db.pricingRule), createdAt: t, updatedAt: t }
         db.accounts.unshift(a)
       }
