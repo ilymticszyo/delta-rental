@@ -1,0 +1,146 @@
+// 三角洲租赁后端。嵌套快照（报价、事件、规则正文）放在 payload / meta JSON 里，
+// 列表过滤需要的字段拆成列。规则每次保存追加一条历史，计算只读当时生效版本。
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Meta {
+  key   String @id
+  value Json
+}
+
+model User {
+  username     String  @id
+  passwordHash String
+  displayName  String
+  role         String
+  enabled      Boolean @default(true)
+  ownerId      String?
+}
+
+model Owner {
+  id          String  @id
+  contact     String
+  displayName String
+  userId      String?
+
+  @@index([contact])
+}
+
+model Renter {
+  contactKey  String  @id
+  contact     String
+  displayName String
+  tag         String?
+  note        String  @default("")
+}
+
+model Account {
+  id            String   @id
+  accountNo     String   @unique
+  status        String
+  source        String
+  ownerId       String?
+  formerOwnerId String?
+  deleted       Boolean  @default(false)
+  payload       Json
+  createdAt     DateTime
+  updatedAt     DateTime
+
+  @@index([status])
+  @@index([ownerId])
+  @@index([deleted])
+}
+
+model Order {
+  id        String   @id
+  orderNo   String   @unique
+  accountId String
+  status    String
+  payload   Json
+  createdAt DateTime
+
+  @@index([accountId])
+  @@index([status])
+}
+
+model Payable {
+  id        String   @id
+  ownerId   String
+  orderId   String?
+  accountId String
+  payload   Json
+  at        DateTime
+
+  @@index([ownerId])
+  @@index([orderId])
+}
+
+model Recycle {
+  id              String   @id
+  requestNo       String   @unique
+  submitter       String
+  status          String
+  sourceAccountId String?
+  ownerId         String?
+  payload         Json
+  createdAt       DateTime
+
+  @@index([submitter])
+  @@index([status])
+}
+
+/// seq = 0 是最新一条。每次写入按内存数组整体覆盖，上限 800。
+model Audit {
+  seq     Int    @id
+  at      DateTime
+  actor   String
+  action  String
+  summary String @db.Text
+}
+
+model Upload {
+  id         String   @id
+  name       String
+  mime       String
+  relPath    String
+  bytes      Int
+  uploadedBy String
+  accountId  String?
+  createdAt  DateTime
+
+  @@index([uploadedBy])
+  @@index([accountId])
+}
+
+/// 不透明 Bearer 令牌，只存哈希。12 小时滑动续期，绝对上限 7 天。
+model Session {
+  tokenHash         String   @id
+  username          String
+  createdAt         DateTime
+  lastSeenAt        DateTime
+  expiresAt         DateTime
+  absoluteExpiresAt DateTime
+
+  @@index([username])
+}
+
+/// Idempotency-Key：同一用户、同一路径、同一请求体 24 小时内重放响应。
+model IdempotencyRecord {
+  id         String   @id
+  username   String
+  route      String
+  bodyHash   String
+  statusCode Int
+  body       Json
+  createdAt  DateTime
+
+  @@index([createdAt])
+}

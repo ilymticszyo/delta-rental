@@ -13,6 +13,7 @@ info:
     - 错误：`{ "error": { "code", "message", "fields"?, "details"?, "requestId"? } }`。
     - 幂等：`POST /orders`、`POST /accounts/import`（dryRun=false）、`POST /orders/{id}/owner-payments` 接受可选请求头 `Idempotency-Key`（服务端保留 24 小时）。同键同请求体 → 重放首次响应（同状态码与响应体，带 `Idempotent-Replayed: true`）；同键不同请求体 → 409 `DUPLICATE`。
     - `x-status: proposed`：前端提议、后端尚未确认 / 实现的操作、参数或字段。客户端对其缺失做了降级（404 / 501 → 提示“后端暂未支持”或回退），契约测试的“每个操作都被用到”检查不包含它们。
+    - v0.4：改计价规则先 `POST /rules/pricing/preview`，再 `PUT /rules/pricing` 带回 `baseVersion` 与 `previewToken`。同一事务里重算未出租库存。`previewToken` 为 HMAC-SHA256，客户端只原样带回。
     - 号主应付台账（/payables）与操作日志（/audit-logs）的 `sort` 接受 `createdAt` 作为 `at` 的别名。
     - 每个操作的 `x-roles` 列出允许的角色（owner 号主 / member 内部成员 / cs 客服 / ops 运营 / admin 管理员）；不在列表中的已登录角色返回 403。
     - 服务端是权限、字段裁剪、算价 / 估值、导入校验与状态流转的唯一权威；客户端算出的任何金额只作预览，服务端忽略并重算。
@@ -678,7 +679,7 @@ paths:
         范围：未删除且 status ∈ {draft, listed, off, held} 的账号（含寄租与自收）进 affected，按候选规则、非熟客口径重算报价（与保存账号时同一实现）。
         status = rented → skipped（RENTED），settling → skipped（SETTLING）：订单在途，报价不动；新规则下算不出价（周期 / 渠道被删、自定义折扣超出新范围）→ skipped（PRICING_ERROR，附 message），保留旧报价。
         价格变化为 0 的账号也在 affected 里（changed=false），保存时同样把报价版本升到新版本。
-        previewToken 不透明，建议 = HMAC(服务端密钥, baseVersion + 规范化的候选规则（去掉 version）+ 每个未删除账号的 id/status/updatedAt/quote.ruleVersion)，保存时重算比对，服务端无需存储；也可加有效期。
+        previewToken 不透明，客户端只原样带回。实现为 HMAC-SHA256（与上传签名同一密钥），输入为 baseVersion、去掉 version 的规范化候选规则、每个未删除账号的 id/status/updatedAt/quote.ruleVersion。形如 pv1.{baseVersion}.{hex}。保存时重算比对，服务端无需存储；也可加有效期。
         不分页（库存量级为数百）。请求体校验与 PUT 相同（422）。
       x-roles: [ops, admin]
       requestBody:

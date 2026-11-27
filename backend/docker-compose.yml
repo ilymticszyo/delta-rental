@@ -1,0 +1,75 @@
+# 面向 2 核 / 2 GB 的轻量服务器：Postgres 压低内存，Node 堆上限 192MB，连接池 5。
+# API 与数据库只绑定在 127.0.0.1，由宿主机 OpenResty 反代 /api。
+# 若 1Panel 的 OpenResty 跑在另一个容器里，见 README「部署」。
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-delta}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-delta}
+      POSTGRES_DB: ${POSTGRES_DB:-delta_rental}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - max_connections=20
+      - -c
+      - wal_buffers=1MB
+      - -c
+      - huge_pages=off
+      - -c
+      - temp_buffers=4MB
+      - -c
+      - max_wal_size=256MB
+      - -c
+      - checkpoint_timeout=15min
+    shm_size: 128mb
+    mem_limit: 320m
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-delta} -d ${POSTGRES_DB:-delta_rental}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-delta}:${POSTGRES_PASSWORD:-delta}@db:5432/${POSTGRES_DB:-delta_rental}?schema=public&connection_limit=5&pool_timeout=10
+      UPLOAD_DIR: /data/uploads
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=192
+    mem_limit: 384m
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - uploads:/data/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/meta').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  pgdata:
+  uploads:
