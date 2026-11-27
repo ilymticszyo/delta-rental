@@ -10,7 +10,7 @@
     <el-table :data="rows" border size="small" @row-click="open">
       <el-table-column prop="requestNo" label="单号" width="90" />
       <el-table-column label="提交时间" width="140"><template #default="{ row }">{{ fmtTime(row.createdAt) }}</template></el-table-column>
-      <el-table-column prop="submitter" label="提交人" width="80" />
+      <el-table-column label="提交人" width="90"><template #default="{ row }">{{ row.submitter }}<el-tag v-if="row.ownerId" size="small" style="margin-left:2px">号主</el-tag></template></el-table-column>
       <el-table-column prop="contact" label="联系方式" width="120" />
       <el-table-column label="资产" min-width="200"><template #default="{ row }">{{ row.asset.region }} · 纯币 {{ row.asset.coinAmount }}M / 总 {{ row.asset.totalAssets }}M · {{ row.asset.safeBox }}格 · 皮肤 {{ row.asset.skins.length }}{{ row.asset.banRecord ? ' · 有封禁' : '' }}</template></el-table-column>
       <el-table-column label="系统参考" width="110"><template #default="{ row }">{{ row.result.rejected ? '转人工' : `${row.result.min}-${row.result.max}` }}</template></el-table-column>
@@ -32,11 +32,21 @@
         <el-descriptions-item label="AWM/6头/6甲">{{ cur.asset.awmCount }}/{{ cur.asset.helmet6Count }}/{{ cur.asset.armor6Count }}</el-descriptions-item>
         <el-descriptions-item label="封禁">{{ cur.asset.banRecord ? '有' : '无' }}</el-descriptions-item>
         <el-descriptions-item label="皮肤" :span="2">{{ cur.asset.skins.join('、') || '无' }}</el-descriptions-item>
-        <el-descriptions-item label="系统估值" :span="2">{{ cur.result.rejected ? '有封禁，转人工' : `中枢 ${cur.result.center}，区间 ${cur.result.min}-${cur.result.max}` }}（规则 v{{ cur.result.ruleVersion }} 快照）</el-descriptions-item>
+        <el-descriptions-item label="系统估值" :span="2">{{ cur.result.rejected ? '有封禁，转人工' : `中枢 ${cur.result.center}，区间 ${cur.result.min}-${cur.result.max}` }}（估值依据 v{{ cur.result.ruleVersion }} 快照：市场系数 {{ cur.result.marketCoefficient ?? 1 }}，保险格系数 {{ cur.result.safeBoxFactor ?? 1 }}）</el-descriptions-item>
+        <el-descriptions-item v-if="cur.sourceAccountId" label="来源" :span="2">号主从自己的账号转入（{{ cur.sourceAccountId.replace('a', 'DF') }}），成交后该账号转为自收</el-descriptions-item>
         <el-descriptions-item label="人工报价" :span="2">{{ cur.staffPrice ?? '未报价' }}</el-descriptions-item>
         <el-descriptions-item v-if="cur.relatedAccountId" label="入库账号" :span="2">{{ cur.relatedAccountId.replace('a', 'DF') }}</el-descriptions-item>
       </el-descriptions>
 
+      <template v-if="cur.result.references?.length">
+        <h4>近期同类成交参考（供人工调价）</h4>
+        <el-table :data="cur.result.references" size="small">
+          <el-table-column prop="title" label="成交" />
+          <el-table-column prop="assetSummary" label="概况" width="140" />
+          <el-table-column prop="dealPrice" label="成交价" width="70" />
+          <el-table-column prop="dealAt" label="日期" width="90" />
+        </el-table>
+      </template>
       <h4>跟进记录</h4>
       <el-timeline>
         <el-timeline-item v-for="(e, i) in cur.events" :key="i" :timestamp="`${fmtTime(e.at)} · ${e.operator}`">
@@ -99,7 +109,7 @@ async function advance() {
 }
 async function toInventory() {
   const a = await run(() => api.recycleToInventory(cur.value!.id))
-  if (a) { ElMessage.success(`已入库为 ${a.accountNo}（已回收持有），可在账号库存上架`); await refresh() }
+  if (a) { ElMessage.success(`已入库为 ${a.accountNo}（自收 · 成本 ${a.costAmount} · 已回收持有），可在账号库存上架`); await refresh() }
 }
 onMounted(async () => { list.value = await api.listRecycles() })
 </script>

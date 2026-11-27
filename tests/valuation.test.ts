@@ -36,3 +36,24 @@ describe('回收估值（PRD 7.2）', () => {
     expect(() => calcValuation({ ...base, contact: ' ' }, defaultValuationRule)).toThrow(/联系方式/)
   })
 })
+
+import { pickReferences } from '../src/domain/valuation'
+describe('动态估值依据（v1.2）', () => {
+  it('整体市场系数与保险格系数参与中枢', () => {
+    const r = calcValuation(base, { ...defaultValuationRule, marketCoefficient: 1.1, safeBoxFactors: { ...defaultValuationRule.safeBoxFactors, '6': 1.05 } })
+    expect(r.center).toBe(Math.round(460 * 0.8 * 1.05 * 1.1))
+    expect(r.marketCoefficient).toBe(1.1)
+    expect(r.safeBoxFactor).toBe(1.05)
+  })
+  it('参考成交价只展示、不改写中枢', () => {
+    const rule = { ...defaultValuationRule, dealReferences: defaultValuationRule.dealReferences.map((d) => ({ ...d, dealPrice: 99999 })) }
+    const r = calcValuation(base, rule)
+    expect(r.center).toBe(368)
+    expect(r.references.length).toBe(3)
+    expect(r.references[0].safeBox).toBe(6) // 同保险格优先
+  })
+  it('停用的参考价不展示', () => {
+    const refs = defaultValuationRule.dealReferences.map((d) => ({ ...d, enabled: d.id === 'd3' }))
+    expect(pickReferences({ coinAmount: 100, safeBox: 6 }, refs).map((d) => d.id)).toEqual(['d3'])
+  })
+})

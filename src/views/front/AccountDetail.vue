@@ -38,15 +38,19 @@
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card shadow="never" header="报价明细">
+        <el-card v-if="!a.quote" shadow="never" header="报价">
+          <p class="muted">号主视图不展示租金与抽成。若这是你的账号，请到「我的账号」查看状态与到手金额。</p>
+          <el-button type="warning" style="width:100%" :disabled="a.status !== 'listed'" @click="dlg = true">联系客服</el-button>
+        </el-card>
+        <el-card v-else shadow="never" header="报价明细">
           <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="原纯币租金">{{ a.quote.originalCoinRent }} 元</el-descriptions-item>
-            <el-descriptions-item label="折扣">{{ a.quote.discountPercent }}{{ a.quote.tierHit ? `（${a.quote.tierHit}）` : '' }}</el-descriptions-item>
-            <el-descriptions-item label="纯币租金">{{ a.quote.coinRent }} 元</el-descriptions-item>
-            <el-descriptions-item label="附加服务费">{{ a.quote.extraFee }} 元</el-descriptions-item>
-            <el-descriptions-item label="押金">{{ a.quote.deposit }} 元</el-descriptions-item>
-            <el-descriptions-item label="总金额"><span class="money">¥{{ a.quote.totalAmount }}</span></el-descriptions-item>
-            <el-descriptions-item label="租期">{{ a.quote.rentalDays }} 天</el-descriptions-item>
+            <el-descriptions-item label="原纯币租金">{{ a.quote!.originalCoinRent }} 元</el-descriptions-item>
+            <el-descriptions-item label="折扣">{{ a.quote!.discountPercent }}{{ a.quote!.tierHit ? `（${a.quote!.tierHit}）` : '' }}</el-descriptions-item>
+            <el-descriptions-item label="纯币租金">{{ a.quote!.coinRent }} 元</el-descriptions-item>
+            <el-descriptions-item label="附加服务费">{{ a.quote!.extraFee }} 元</el-descriptions-item>
+            <el-descriptions-item label="押金">{{ a.quote!.deposit }} 元</el-descriptions-item>
+            <el-descriptions-item label="总金额"><span class="money">¥{{ a.quote!.totalAmount }}</span></el-descriptions-item>
+            <el-descriptions-item label="租期">{{ a.quote!.rentalDays }} 天</el-descriptions-item>
           </el-descriptions>
           <el-alert type="info" :closable="false" style="margin-top:10px" title="AWM / 6头 / 6甲按实际使用从押金扣除。" />
           <el-button type="warning" style="width:100%;margin-top:12px" :disabled="a.status !== 'listed'" @click="dlg = true">联系客服下单</el-button>
@@ -62,7 +66,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../../api'
 import { skinCategory } from '../../config/rules'
-import { ACCOUNT_STATUS_LABEL, type Account } from '../../domain/types'
+import { ACCOUNT_STATUS_LABEL, type LobbyAccount as Account } from '../../domain/types'
 import { copy, statusTagType } from '../../utils'
 import ContactDialog from '../../components/ContactDialog.vue'
 const route = useRoute()

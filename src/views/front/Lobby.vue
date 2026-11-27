@@ -2,6 +2,7 @@
   <div class="page">
     <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px"
       title="公告：本站为内部流通工具，成交线下完成。AWM / 6头 / 6甲按实际使用从押金扣除。" />
+    <el-alert v-if="!showPrice" type="info" :closable="false" show-icon style="margin-bottom:12px" title="号主视图：大厅不展示租金与报价。你自己的账号状态与到手金额请看「我的账号」。" />
     <el-card shadow="never">
       <div class="row-gap" style="margin-bottom:10px">
         <el-input v-model="f.keyword" placeholder="搜索编号 / 皮肤名" clearable style="width:220px" />
@@ -59,15 +60,15 @@
         <span v-if="!row.skins.length" class="muted">无</span></template></el-table-column>
       <el-table-column prop="secretKd" label="绝密KD" width="70" />
       <el-table-column label="比例" width="64"><template #default="{ row }">1:{{ row.coinRatio }}</template></el-table-column>
-      <el-table-column label="纯币租金" width="80"><template #default="{ row }">{{ row.quote.coinRent }}</template></el-table-column>
-      <el-table-column label="附加费" width="64"><template #default="{ row }">{{ row.quote.extraFee }}</template></el-table-column>
-      <el-table-column label="押金" width="60"><template #default="{ row }">{{ row.quote.deposit }}</template></el-table-column>
-      <el-table-column label="总金额" width="76"><template #default="{ row }"><span class="money">¥{{ row.quote.totalAmount }}</span></template></el-table-column>
-      <el-table-column label="租期" width="60"><template #default="{ row }">{{ row.quote.rentalDays }}天</template></el-table-column>
+      <el-table-column v-if="showPrice" label="纯币租金" width="80"><template #default="{ row }">{{ row.quote?.coinRent }}</template></el-table-column>
+      <el-table-column v-if="showPrice" label="附加费" width="64"><template #default="{ row }">{{ row.quote?.extraFee }}</template></el-table-column>
+      <el-table-column v-if="showPrice" label="押金" width="60"><template #default="{ row }">{{ row.quote?.deposit }}</template></el-table-column>
+      <el-table-column v-if="showPrice" label="总金额" width="76"><template #default="{ row }"><span class="money">¥{{ row.quote?.totalAmount }}</span></template></el-table-column>
+      <el-table-column label="租期" width="60"><template #default="{ row }">{{ row.quote?.rentalDays }}天</template></el-table-column>
       <el-table-column prop="loginMethod" label="登录" width="60" />
       <el-table-column prop="assistTime" label="辅助时间" width="100" />
       <el-table-column prop="channel" label="渠道" width="80" />
-      <el-table-column label="折扣" width="60"><template #default="{ row }">{{ row.quote.discountPercent < 100 ? row.quote.discountPercent + '折' : '-' }}</template></el-table-column>
+      <el-table-column v-if="showPrice" label="折扣" width="60"><template #default="{ row }">{{ (row.quote?.discountPercent ?? 100) < 100 ? row.quote?.discountPercent + '折' : '-' }}</template></el-table-column>
       <el-table-column prop="remark" label="备注" min-width="110" show-overflow-tooltip />
       <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }">
         <el-button link type="primary" @click="go(row)">详情</el-button>
@@ -82,7 +83,7 @@
           <div class="muted">{{ a.region }} / {{ a.loginMethod }} / {{ a.channel }} · AWM {{ a.awmCount }} · 6头 {{ a.helmet6Count }} · 6甲 {{ a.armor6Count }}</div>
           <div style="margin:6px 0;min-height:24px"><el-tag v-for="s in a.skins.slice(0, 3)" :key="s" size="small" style="margin:1px">{{ s }}</el-tag></div>
           <div class="row-gap" style="justify-content:space-between">
-            <span class="money" style="font-size:18px">¥{{ a.quote.totalAmount }}</span><span class="muted">{{ a.quote.rentalDays }} 天 · 押金 {{ a.quote.deposit }}</span></div>
+            <span v-if="showPrice" class="money" style="font-size:18px">¥{{ a.quote?.totalAmount }}</span><span v-if="showPrice" class="muted">{{ a.quote?.rentalDays }} 天 · 押金 {{ a.quote?.deposit }}</span><span v-else class="muted">报价仅内部可见</span></div>
           <div class="row-gap" style="margin-top:8px">
             <el-button size="small" @click="copy(a.accountNo)">复制编号</el-button>
             <el-button size="small" @click="go(a)">详情</el-button>
@@ -102,11 +103,12 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '../../api'
 import { dicts, quickFilters } from '../../config/rules'
-import type { Account } from '../../domain/types'
+import type { LobbyAccount as Account } from '../../domain/types'
 import { copy } from '../../utils'
 import ContactDialog from '../../components/ContactDialog.vue'
 
 const router = useRouter()
+const showPrice = api.currentUser()?.role !== 'owner'
 const list = ref<Account[]>([])
 const adv = ref(false)
 const empty = () => ({ keyword: '', region: '', loginMethod: '', channel: '', safeBox: undefined as number | undefined, rank: '', ban: '', skins: [] as string[],
@@ -117,7 +119,7 @@ const reset = () => Object.assign(f, empty())
 
 const sortLabels = { coin: '哈夫币（纯币）', price: '价格', ratio: '比例', awm: 'AWM', h6: '六头', a6: '六甲', newest: '最新上架' }
 const sortGetters: Record<string, (a: Account) => number | string> = {
-  coin: (a) => a.coinAmount, price: (a) => a.quote.totalAmount, ratio: (a) => a.coinRatio, awm: (a) => a.awmCount,
+  coin: (a) => a.coinAmount, price: (a) => a.quote?.totalAmount ?? 0, ratio: (a) => a.coinRatio, awm: (a) => a.awmCount,
   h6: (a) => a.helmet6Count, a6: (a) => a.armor6Count, newest: (a) => a.createdAt,
 }
 const pref = JSON.parse(localStorage.getItem('dr:v1:lobbyPref') || '{}')
@@ -144,15 +146,15 @@ const filtered = computed(() => {
     if (f.skins.length && !f.skins.every((s) => a.skins.includes(s))) return false
     if (f.coinMin != null && a.coinAmount < f.coinMin) return false
     if (f.coinMax != null && a.coinAmount > f.coinMax) return false
-    if (f.priceMin != null && a.quote.totalAmount < f.priceMin) return false
-    if (f.priceMax != null && a.quote.totalAmount > f.priceMax) return false
+    if (f.priceMin != null && (a.quote?.totalAmount ?? 0) < f.priceMin) return false
+    if (f.priceMax != null && (a.quote?.totalAmount ?? 0) > f.priceMax) return false
     if (f.awm != null && a.awmCount < f.awm) return false
     if (f.h6 != null && a.helmet6Count < f.h6) return false
     if (f.a6 != null && a.armor6Count < f.a6) return false
     if (f.kd != null && a.secretKd < f.kd) return false
     if (f.expCard && !a.experienceCardCount) return false
-    if (f.quick === 'discount' && a.quote.discountPercent >= 100) return false
-    if (f.quick === 'small' && a.quote.totalAmount > 300) return false
+    if (f.quick === 'discount' && (a.quote?.discountPercent ?? 100) >= 100) return false
+    if (f.quick === 'small' && (a.quote?.totalAmount ?? Infinity) > 300) return false
     if (f.quick === 'box9' && a.safeBox !== 9) return false
     if (f.quick === 'box6' && a.safeBox !== 6) return false
     if (f.quick === 'box4' && a.safeBox !== 4) return false

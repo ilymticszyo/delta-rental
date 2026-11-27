@@ -67,3 +67,34 @@ describe('算价文本可被后台解析', () => {
     expect(p).toMatchObject({ ownerContact: 'wx_abc', region: 'QQ区', coinAmount: 100, totalAssets: 300, coinRatio: 20, channel: '普通区', cycle: '10M/天', safeBox: 6, deposit: 200, awmCount: 1, helmet6Count: 2, armor6Count: 3, skins: ['威龙·赤焰', '龙牙战刀'] })
   })
 })
+
+describe('熟客优惠（v1.2）', () => {
+  it('best 模式：与系统档取更优惠的一档，并免押金', () => {
+    const r = calcPricing({ ...base, renterRegular: true }, defaultPricingRule) // 未触发档位，100 → 熟客 95
+    expect(r.discountPercent).toBe(95)
+    expect(r.coinRent).toBe(475)
+    expect(r.regularDiscountApplied).toBe(true)
+    expect(r.deposit).toBe(0)
+    expect(r.depositWaived).toBe(true)
+    expect(r.totalAmount).toBe(475)
+  })
+  it('best 模式：系统档已更优惠时不再叠加', () => {
+    const r = calcPricing({ ...base, coinAmount: 650, renterRegular: true }, defaultPricingRule) // 系统 95 折，熟客 95
+    expect(r.discountPercent).toBe(95)
+    expect(r.regularDiscountApplied).toBe(false)
+    const r2 = calcPricing({ ...base, coinAmount: 650, renterRegular: true }, { ...defaultPricingRule, regularDiscountPercent: 90 })
+    expect(r2.discountPercent).toBe(90)
+  })
+  it('multiply 模式：在系统档基础上再乘', () => {
+    const rule = { ...defaultPricingRule, triggerMetric: 'totalAssets' as const, regularMode: 'multiply' as const }
+    const r = calcPricing({ ...base, renterRegular: true }, rule) // 466 x 95% = 442.7 -> 443
+    expect(r.coinRent).toBe(443)
+  })
+  it('关闭免押金时押金照收；非熟客不受影响', () => {
+    const r = calcPricing({ ...base, renterRegular: true }, { ...defaultPricingRule, regularWaiveDeposit: false })
+    expect(r.deposit).toBe(200)
+    const n = calcPricing(base, defaultPricingRule)
+    expect(n.regularDiscountApplied).toBe(false)
+    expect(n.deposit).toBe(200)
+  })
+})

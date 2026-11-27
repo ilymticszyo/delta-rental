@@ -1,6 +1,6 @@
 import type { ValuationRule } from '../config/rules'
 import { skinCategory } from '../config/rules'
-import type { ValuationInput, ValuationResult, ValuationLine } from './types'
+import type { DealReference, ValuationInput, ValuationResult, ValuationLine } from './types'
 
 const r = (n: number) => Math.round(n)
 
@@ -19,7 +19,17 @@ export function skinUnitPrice(name: string, rule: ValuationRule): number {
   return rule.skinCategoryPrices[skinCategory(name)] ?? 0
 }
 
-/** PRD 7.2 回收估值 */
+/** 近期同类成交：启用项中，同保险格优先，再按纯币接近程度取前 n 条 */
+export function pickReferences(input: Pick<ValuationInput, 'coinAmount' | 'safeBox'>, refs: DealReference[], n = 3): DealReference[] {
+  return refs
+    .filter((d) => d.enabled)
+    .map((d) => ({ d, score: (d.safeBox === input.safeBox ? 0 : 1000) + Math.abs(d.coinAmount - input.coinAmount) }))
+    .sort((a, b) => a.score - b.score || a.d.sort - b.d.sort)
+    .slice(0, n)
+    .map((x) => ({ ...x.d }))
+}
+
+/** PRD 7.2 回收估值（v1.2：资产系数 + 整体市场系数 + 参考成交价） */
 export function calcValuation(input: ValuationInput, rule: ValuationRule): ValuationResult {
   const errs = validateValuationInput(input)
   if (errs.length) throw new Error(errs.join('；'))
@@ -33,8 +43,10 @@ export function calcValuation(input: ValuationInput, rule: ValuationRule): Valua
     input.experienceCardCount * p.experienceCard +
     (rule.rankPrices[input.rank] ?? 0)
   const banFactor = input.banRecord ? rule.banFactor : 1
+  const safeBoxFactor = rule.safeBoxFactors?.[String(input.safeBox)] ?? 1
+  const marketCoefficient = rule.marketCoefficient ?? 1
   const rejected = input.banRecord && rule.rejectIfBanned
-  const centerRaw = rejected ? 0 : (coinValue + skinValue + extraValue) * banFactor * rule.buyDiscount
+  const centerRaw = rejected ? 0 : (coinValue + skinValue + extraValue) * banFactor * safeBoxFactor * rule.buyDiscount * marketCoefficient
   const lines: ValuationLine[] = [
     { label: `纯币折算（${input.coinAmount}M ÷ 比例 1:${rule.buyRatio}）`, value: r(coinValue) },
     { label: `皮肤加价（${input.skins.length} 枚）`, value: r(skinValue) },
@@ -47,7 +59,10 @@ export function calcValuation(input: ValuationInput, rule: ValuationRule): Valua
     skinValue: r(skinValue),
     extraValue: r(extraValue),
     banFactor,
+    safeBoxFactor,
     buyDiscount: rule.buyDiscount,
+    marketCoefficient,
+    references: pickReferences(input, rule.dealReferences ?? []),
     center: r(centerRaw),
     min: r(centerRaw * (1 - rule.floatDown)),
     max: r(centerRaw * (1 + rule.floatUp)),

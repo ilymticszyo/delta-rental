@@ -20,7 +20,7 @@ export function validatePricingInput(input: PricingInput, rule: PricingRule): st
   return errs
 }
 
-/** PRD 7.1 出租计价。金额每步四舍五入到元。 */
+/** PRD 7.1 出租计价（v1.2 含熟客优惠）。金额每步四舍五入到元。 */
 export function calcPricing(input: PricingInput, rule: PricingRule): PricingResult {
   const errs = validatePricingInput(input, rule)
   if (errs.length) throw new PricingError(errs.join('；'))
@@ -41,13 +41,28 @@ export function calcPricing(input: PricingInput, rule: PricingRule): PricingResu
   }
 
   const originalCoinRent = r((input.coinAmount * 100) / usedRatio)
-  const coinRent = r((originalCoinRent * discountPercent) / 100)
+  let coinRent = r((originalCoinRent * discountPercent) / 100)
+  let regularDiscountApplied = false
+  const regular = !!input.renterRegular
+  if (regular && rule.regularDiscountPercent < 100) {
+    regularDiscountApplied = true
+    if (rule.regularMode === 'multiply') {
+      coinRent = r((coinRent * rule.regularDiscountPercent) / 100)
+      discountPercent = Math.round(discountPercent * rule.regularDiscountPercent) / 100
+    } else if (rule.regularDiscountPercent < discountPercent) {
+      discountPercent = rule.regularDiscountPercent
+      coinRent = r((originalCoinRent * discountPercent) / 100)
+    } else {
+      regularDiscountApplied = false // 系统档已更优惠
+    }
+  }
   const serviceFeeRate = rule.channelFeeRates[input.channel]
   const serviceFee = r((coinRent * serviceFeeRate) / 100)
   const ownerSettlement = coinRent - serviceFee
   const extraFee = rule.extraFee.mode === 'fixed' ? r(rule.extraFee.value) : r((coinRent * rule.extraFee.value) / 100)
   const renterRent = coinRent + extraFee
-  const deposit = r(input.deposit)
+  const depositWaived = regular && rule.regularWaiveDeposit
+  const deposit = regular && rule.regularWaiveDeposit ? 0 : r(input.deposit)
   const cycleValue = rule.cycleValues[input.cycle]
   const rentalDays =
     rule.dayCalcMode === 'byCycleRate' ? Math.max(1, Math.floor(input.coinAmount / cycleValue)) : Math.max(1, cycleValue)
@@ -67,6 +82,8 @@ export function calcPricing(input: PricingInput, rule: PricingRule): PricingResu
     deposit,
     totalAmount: renterRent + deposit,
     rentalDays,
+    regularDiscountApplied,
+    depositWaived,
   }
 }
 
@@ -76,9 +93,9 @@ export function pricingToText(input: PricingInput, res: PricingResult, extra: Re
     ...Object.entries(extra).map(([k, v]) => `${k}：${v}`),
     `纯币：${input.coinAmount}M  总资产：${input.totalAssets}M`,
     `比例：1:${input.coinRatio}（实际 1:${res.usedRatio}）  渠道：${input.channel}  周期：${input.cycle}`,
-    `原租金：${res.originalCoinRent} 元  折扣：${res.discountPercent}  折后租金：${res.coinRent} 元`,
+    `原租金：${res.originalCoinRent} 元  折扣：${res.discountPercent}  折后租金：${res.coinRent} 元${res.regularDiscountApplied ? '（含熟客折扣）' : ''}`,
     `服务费（${res.serviceFeeRate}%）：${res.serviceFee} 元  号主可得：${res.ownerSettlement} 元`,
-    `附加服务费：${res.extraFee} 元  押金：${res.deposit} 元  总金额：${res.totalAmount} 元`,
+    `附加服务费：${res.extraFee} 元  押金：${res.deposit} 元${res.depositWaived ? '（熟客免押）' : ''}  总金额：${res.totalAmount} 元`,
     `出租天数：${res.rentalDays} 天  规则版本：v${res.ruleVersion}`,
   ]
   return lines.join('\n')

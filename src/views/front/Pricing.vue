@@ -22,6 +22,7 @@
               <el-col :span="12"><el-form-item label="上架渠道" prop="channel"><el-select v-model="f.channel"><el-option v-for="o in channels" :key="o" :value="o" /></el-select></el-form-item></el-col></el-row>
             <el-row><el-col :span="12"><el-form-item label="周期" prop="cycle"><el-select v-model="f.cycle"><el-option v-for="o in cycles" :key="o" :value="o" /></el-select></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="押金(元)"><el-input-number v-model="f.deposit" :min="0" /></el-form-item></el-col></el-row>
+            <el-form-item v-if="!isOwner" label="租客联系方式"><el-input v-model="f.renterContact" placeholder="可选：熟客自动带入优惠，如 wx_vip_laoliu" /></el-form-item>
             <el-form-item label="折扣">
               <el-radio-group v-model="f.discountMode"><el-radio value="system">系统推荐</el-radio><el-radio value="custom">自定义</el-radio></el-radio-group>
               <el-input-number v-if="f.discountMode === 'custom'" v-model="f.customDiscountPercent" :min="rule?.customDiscountMin" :max="rule?.customDiscountMax" style="margin-left:12px" />
@@ -35,21 +36,34 @@
         <el-card shadow="never" style="position:sticky;top:12px">
           <template #header><span class="card-title">计算结果</span></template>
           <el-empty v-if="!res" description="填写左侧表单后点击「立即精准计算」" />
+          <template v-else-if="isOwner">
+            <div style="text-align:center;padding:20px 0">
+              <div class="muted">预计到手金额（每个租期）</div>
+              <div class="money" style="font-size:34px">¥{{ res.ownerSettlement }}</div>
+              <div class="muted">规则 v{{ res.ruleVersion }} · 以运营确认为准</div>
+            </div>
+            <el-button type="primary" style="width:100%" @click="$router.push('/owner/list')">去上架</el-button>
+          </template>
           <template v-else>
+            <el-alert v-if="res.regularDiscountApplied || res.depositWaived" type="success" :closable="false" style="margin-bottom:10px"
+              :title="`已识别熟客：${res.regularDiscountApplied ? '已带入熟客折扣' : ''}${res.regularDiscountApplied && res.depositWaived ? '，' : ''}${res.depositWaived ? '免押金' : ''}`" />
             <el-descriptions :column="1" border>
-              <el-descriptions-item label="号主可得"><span class="money" style="font-size:20px">¥{{ res.ownerSettlement }}</span></el-descriptions-item>
-              <el-descriptions-item label="原租金">{{ res.originalCoinRent }} 元（实际比例 1:{{ res.usedRatio }}）</el-descriptions-item>
+              <el-descriptions-item v-if="res.ownerSettlement != null" label="号主可得"><span class="money" style="font-size:20px">¥{{ res.ownerSettlement }}</span></el-descriptions-item>
+              <el-descriptions-item label="原租金">{{ res.originalCoinRent }} 元<span v-if="res.usedRatio">（实际比例 1:{{ res.usedRatio }}）</span></el-descriptions-item>
               <el-descriptions-item label="折后租金">{{ res.coinRent }} 元（{{ res.discountPercent }}{{ res.tierHit ? '，' + res.tierHit : '' }}）</el-descriptions-item>
-              <el-descriptions-item label="服务费">{{ res.serviceFee }} 元（{{ res.serviceFeeRate }}%）</el-descriptions-item>
+              <el-descriptions-item v-if="res.serviceFee != null" label="服务费">{{ res.serviceFee }} 元（{{ res.serviceFeeRate }}%）</el-descriptions-item>
               <el-descriptions-item label="附加服务费">{{ res.extraFee }} 元</el-descriptions-item>
               <el-descriptions-item label="押金">{{ res.deposit }} 元</el-descriptions-item>
               <el-descriptions-item label="租客总金额">{{ res.totalAmount }} 元</el-descriptions-item>
               <el-descriptions-item label="出租天数">{{ res.rentalDays }} 天</el-descriptions-item>
               <el-descriptions-item label="规则版本">v{{ res.ruleVersion }}</el-descriptions-item>
             </el-descriptions>
-            <pre class="copy">{{ text }}</pre>
-            <el-button type="primary" @click="copy(text)">一键复制算价信息</el-button>
-            <span class="muted" style="margin-left:8px">可粘贴到后台「账号库存 → 新增」</span>
+            <template v-if="full">
+              <pre class="copy">{{ text }}</pre>
+              <el-button type="primary" @click="copy(text)">一键复制算价信息</el-button>
+              <span class="muted" style="margin-left:8px">可粘贴到后台「账号库存 → 新增」</span>
+            </template>
+            <p v-else class="muted">内部成员只见租客应付部分；号主可得与服务费仅客服 / 运营 / 管理员可见。</p>
           </template>
         </el-card>
       </el-col>
@@ -63,6 +77,7 @@ import { api } from '../../api'
 import { dicts, type PricingRule } from '../../config/rules'
 import { pricingToText } from '../../domain/pricing'
 import type { PricingResult } from '../../domain/types'
+import { can } from '../../domain/permissions'
 import { copy, run } from '../../utils'
 
 const rule = ref<PricingRule>()
@@ -71,16 +86,19 @@ const cycles = computed(() => Object.keys(rule.value?.cycleValues ?? {}))
 const f = reactive({
   ownerContact: '', region: '', loginMethod: '', assistTime: '全天', coinAmount: 100, totalAssets: 150, safeBox: 6, awmCount: 0,
   helmet6Count: 0, armor6Count: 0, skins: [] as string[], coinRatio: 20, channel: '普通区', cycle: '10M/天', deposit: 0,
-  discountMode: 'system' as 'system' | 'custom', customDiscountPercent: 95,
+  discountMode: 'system' as 'system' | 'custom', customDiscountPercent: 95, renterContact: '',
 })
 const req = (m: string) => [{ required: true, message: m, trigger: 'change' }]
 const rules = { ownerContact: req('请填写号主联系方式'), region: req('请选择大区'), loginMethod: req('请选择上号方式'), assistTime: req('请填写辅助上号时段'),
   coinAmount: [{ validator: (_: any, v: number, cb: any) => (v > 0 ? cb() : cb(new Error('纯币需大于 0'))), trigger: 'change' }],
   coinRatio: req('请填写比例'), channel: req('请选择渠道'), cycle: req('请选择周期') }
 const formRef = ref<FormInstance>()
-const res = ref<PricingResult | null>(null)
+const user = api.currentUser()
+const isOwner = user?.role === 'owner'
+const full = can(user?.role, 'seeCommission')
+const res = ref<Partial<PricingResult> | null>(null)
 watch(f, () => (res.value = null)) // 改表单后需重新计算
-const text = computed(() => (res.value ? pricingToText(f, res.value, {
+const text = computed(() => (res.value && full ? pricingToText(f, res.value as PricingResult, {
   号主联系方式: f.ownerContact, 大区: f.region, 上号方式: f.loginMethod, 辅助时段: f.assistTime, 保险格: `${f.safeBox}格`,
   'AWM/6头/6甲': `${f.awmCount}/${f.helmet6Count}/${f.armor6Count}`, 皮肤: f.skins.join('、') || '无' }) : ''))
 async function calc() {
