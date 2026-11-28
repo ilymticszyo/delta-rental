@@ -69,7 +69,8 @@
       <el-table-column prop="assistTime" label="辅助时间" width="100" />
       <el-table-column prop="channel" label="渠道" width="80" />
       <el-table-column v-if="showPrice" label="折扣" width="60"><template #default="{ row }">{{ (row.quote?.discountPercent ?? 100) < 100 ? row.quote?.discountPercent + '折' : '-' }}</template></el-table-column>
-      <el-table-column prop="remark" label="备注" min-width="110" show-overflow-tooltip />
+      <el-table-column prop="remark" label="对外备注" min-width="110" show-overflow-tooltip />
+      <el-table-column v-if="showInternal" prop="internalRemark" label="内部备注" min-width="110" show-overflow-tooltip />
       <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }">
         <el-button link type="primary" @click="go(row)">详情</el-button>
         <el-button link type="warning" @click="contact(row)">联系客服下单</el-button></template></el-table-column>
@@ -105,11 +106,13 @@ import { api } from '../../api'
 import { quickFilters } from '../../config/rules'
 import { dicts } from '../../config/dictStore'
 import type { LobbyAccount as Account } from '../../domain/types'
+import { can } from '../../domain/permissions'
 import { copy } from '../../utils'
 import ContactDialog from '../../components/ContactDialog.vue'
 
 const router = useRouter()
 const showPrice = api.currentUser()?.role !== 'owner'
+const showInternal = can(api.currentUser()?.role, 'inventoryView')
 const list = ref<Account[]>([])
 const adv = ref(false)
 const empty = () => ({ keyword: '', region: '', loginMethod: '', channel: '', safeBox: undefined as number | undefined, rank: '', ban: '', skins: [] as string[],
@@ -136,7 +139,7 @@ watch(f, () => (pageNo.value = 1))
 const filtered = computed(() => {
   const kw = f.keyword.trim().toLowerCase()
   const out = list.value.filter((a) => {
-    if (kw && !a.accountNo.toLowerCase().includes(kw) && !a.skins.some((s) => s.toLowerCase().includes(kw))) return false
+    if (kw && !a.accountNo.toLowerCase().includes(kw) && !a.skins.some((s) => s.toLowerCase().includes(kw)) && !(a.remark ?? '').toLowerCase().includes(kw) && !(showInternal ? (a.internalRemark ?? '') : '').toLowerCase().includes(kw)) return false
     if (f.region && a.region !== f.region) return false
     if (f.loginMethod && a.loginMethod !== f.loginMethod && a.loginMethod !== '均可') return false
     if (f.channel && a.channel !== f.channel) return false

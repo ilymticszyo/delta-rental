@@ -79,6 +79,8 @@
           <el-popconfirm v-if="!cur.handedOver" title="未交号前取消？账号恢复空闲，号主应付冲销" @confirm="act(() => api.cancelOrder(cur!.id), '已取消')"><template #reference><el-button size="small" type="danger">取消</el-button></template></el-popconfirm>
         </template>
         <template v-if="cur.status === 'settling'">
+          <el-alert v-if="!cur.handedOver || !cur.returned" type="error" :closable="false" show-icon style="width:100%" :title="completeBlockReason(cur)" />
+          <el-button v-if="!cur.handedOver" size="small" @click="act(() => api.markHandover(cur!.id), '已登记交号')">补登记交号</el-button>
           <el-button v-if="!cur.returned" size="small" @click="act(() => api.markReturned(cur!.id), '已登记还号')">登记还号</el-button>
           <el-button size="small" type="success" @click="dlgDone = true">完成结算</el-button>
         </template>
@@ -122,6 +124,7 @@
 
   <el-dialog v-model="dlgDone" :title="`完成结算 · ${cur?.orderNo}`" width="480px">
     <template v-if="cur">
+      <el-alert v-if="!cur.handedOver || !cur.returned" type="error" :closable="false" show-icon style="margin-bottom:10px" :title="completeBlockReason(cur)" />
       <p>押金余额：<b>{{ depositBalance(cur) }}</b> 元；号主未付：<b>{{ cur.ownerPayableBalance }}</b> 元。不为 0 时需填写说明（如不退原因、号主月结）。</p>
       <el-form label-width="90px">
         <el-form-item label="账号去向"><el-radio-group v-model="relist"><el-radio :value="true">结算再上架</el-radio><el-radio :value="false">结算后下架</el-radio></el-radio-group></el-form-item>
@@ -221,6 +224,10 @@ async function payOwner() {
 const dlgDone = ref(false)
 const relist = ref(true)
 const doneNote = ref('')
+function completeBlockReason(o: { handedOver: boolean; returned: boolean }) {
+  const missing = [!o.handedOver ? '交号' : '', !o.returned ? '还号' : ''].filter(Boolean)
+  return `请先登记${missing.join('和')}，确认账号已回到手中后再完成结算。未确认还号不能把账号放回上架。`
+}
 async function complete() {
   if (await run(() => api.completeOrder(cur.value!.id, relist.value, doneNote.value), '订单已完成')) { dlgDone.value = false; doneNote.value = ''; await reloadCur() }
 }

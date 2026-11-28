@@ -174,7 +174,7 @@ async function createAccounts(admin: HttpApi, n: number, over: Partial<AccountIn
       region: ctx.regions[0], loginMethod: ctx.loginMethods[0], channel: opts.channels[0], assistTime: '09:00-23:00', banRecord: false,
       totalAssets: 400, coinAmount: 300, secretKd: 1.2, level: 40, rank: ctx.ranks[0], safeBox: ctx.safeBoxes[0], stamina: ctx.stamina[0], load: ctx.loads[0],
       awmCount: 0, helmet6Count: 0, armor6Count: 0, experienceCardCount: 0, skins: [], cycle: opts.cycles[0], coinRatio: 20, discountMode: 'system',
-      deposit: 100, remark: '契约测试', ...over,
+      deposit: 100, remark: '契约测试', internalRemark: '', ...over,
     }))
   }
   return out
@@ -480,6 +480,26 @@ describe('HttpApi ↔ 契约：每个方法的路径、方法、请求与响应'
     if (!m) return skipWith(ctx, skipReason)
     const lobby = await m.api.listListedAccounts()
     expect(lobby.every((a) => a.quote && a.quote.ownerSettlement === undefined && a.quote.serviceFee === undefined)).toBe(true)
+    expect(lobby.every((a) => !('internalRemark' in a))).toBe(true)
+  })
+
+  it('未交号或未还号不能结算上架；内部备注不出现在成员大厅', async (ctx) => {
+    const { api } = await asAdmin()
+    const [acc] = await createAccounts(api, 1, { remark: '大厅可见', internalRemark: '内部机密XYZ' })
+    expect(acc).toMatchObject({ remark: '大厅可见', internalRemark: '内部机密XYZ' })
+    const member = await loginAs('member')
+    if (!member) return skipWith(ctx, skipReason)
+    const seen = (await member.api.listListedAccounts()).find((a) => a.id === acc.id)
+    expect(seen?.remark).toBe('大厅可见')
+    expect(seen && 'internalRemark' in seen).toBe(false)
+    expect(JSON.stringify(seen)).not.toContain('内部机密XYZ')
+    const gate = await api.createOrder(orderInput(acc.id, uniq('wx_ct_gate_').toLowerCase(), { deposit: 0 }))
+    await api.endOrder(gate.id)
+    await expect(api.completeOrder(gate.id, true)).rejects.toMatchObject({ code: 409, errorCode: 'INVALID_TRANSITION' })
+    await expect(api.markReturned(gate.id)).rejects.toMatchObject({ code: 409, errorCode: 'INVALID_TRANSITION' })
+    await api.markHandover(gate.id)
+    await api.markReturned(gate.id)
+    expect((await api.getOrder(gate.id)).returned).toBe(true)
   })
 
   it('改规则重算库存：预览不落库；租赁中跳过；确认后原子重算并升报价版本；旧预览 / 旧版本 409 RULE_CONFLICT', async (ctx) => {

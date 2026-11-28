@@ -28,7 +28,8 @@
             <el-descriptions-item label="九格体验卡">{{ a.experienceCardCount }}</el-descriptions-item>
             <el-descriptions-item label="封禁记录">{{ a.banRecord ? '有' : '无' }}</el-descriptions-item>
             <el-descriptions-item label="周期">{{ a.cycle }}</el-descriptions-item>
-            <el-descriptions-item label="备注" :span="3">{{ a.remark || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="对外备注" :span="3">{{ a.remark || '—' }}</el-descriptions-item>
+            <el-descriptions-item v-if="a.internalRemark !== undefined" label="内部备注" :span="3">{{ a.internalRemark || '—' }}</el-descriptions-item>
           </el-descriptions>
         </el-card>
         <el-card shadow="never" style="margin-top:12px">

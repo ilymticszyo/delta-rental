@@ -6,7 +6,7 @@ import { calcPricing } from '../domain/pricing'
 import { can, type Cap } from '../domain/permissions'
 import { buildReport, platformIncome, type ReportDimension } from '../domain/reports'
 import { calcValuation, validateValuationInput } from '../domain/valuation'
-import { lobbyAccountFor, pricingFor, toOwnerView } from '../domain/visibility'
+import { lobbyAccountFor, normalizeAccountRemarks, pricingFor, settleRemarks, toOwnerView } from '../domain/visibility'
 import type {
   Account, AccountAdminView, AccountInput, Attachment, AccountStatus, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep, OwnerPayableEntry,
   OwnerProfile, PricingInput, RecycleRequest, RecycleStatus, RenterProfile, RenterTag, RentalOrder, StaffCreateInput, StaffUser, User, ValuationInput,
@@ -49,7 +49,10 @@ export class LocalApi implements Api {
     if (raw) {
       try {
         const db = JSON.parse(raw) as Db
-        if (db.seedVersion === SEED_VERSION) return db
+        if (db.seedVersion === SEED_VERSION) {
+          this.migrateRemarks(db)
+          return db
+        }
       } catch { /* 损坏则重建 */ }
       // 旧版本（v0.1 无 seedVersion）数据结构不兼容：整体重置为新种子，并清掉会话
       this.storage.removeItem(SESSION_KEY)
@@ -59,6 +62,17 @@ export class LocalApi implements Api {
     return db
   }
   private save(db: Db) { this.storage.setItem(DB_KEY, JSON.stringify(db)) }
+  /** 旧本地数据只有一个备注：收进内部备注，对外清空。已拆分的不动。 */
+  private migrateRemarks(db: Db) {
+    let dirty = false
+    for (const a of db.accounts ?? []) {
+      if (typeof a.internalRemark !== 'string') {
+        normalizeAccountRemarks(a)
+        dirty = true
+      }
+    }
+    if (dirty) this.save(db)
+  }
   private tx<T>(fn: (db: Db) => T): T {
     const db = this.load()
     const out = fn(db)
@@ -311,7 +325,7 @@ export class LocalApi implements Api {
       totalAssets: asset.totalAssets, coinAmount: asset.coinAmount, secretKd: 0, level: asset.level, rank: asset.rank, safeBox: asset.safeBox,
       stamina: '1级', load: '1级', awmCount: asset.awmCount, helmet6Count: asset.helmet6Count, armor6Count: asset.armor6Count,
       experienceCardCount: asset.experienceCardCount, skins: [...asset.skins], cycle: d.cycle, coinRatio: d.coinRatio, discountMode: 'system',
-      deposit: db.pricingRule.defaultDeposit, remark,
+      deposit: db.pricingRule.defaultDeposit, remark: '', internalRemark: remark,
     }
   }
   async ownerEstimate(asset: ValuationInput) {
@@ -367,6 +381,7 @@ export class LocalApi implements Api {
   async listAccounts() {
     this.need('inventoryView')
     const db = this.load()
+    if (this.sweepExpiredOrders(db)) this.save(db)
     return db.accounts.filter((a) => !a.deleted).map((a) => this.adminView(db, clone(a)))
   }
   async saveAccount(input: AccountInput) {
@@ -378,13 +393,13 @@ export class LocalApi implements Api {
       if (input.id) {
         const a = this.findAccount(db, input.id)
         if (input.status !== a.status) throw new ApiError('状态请用状态操作按钮修改')
-        Object.assign(a, input, { quote, updatedAt: t, attachments: this.bindAttachments(input.attachments, a.attachments, a.id) })
+        Object.assign(a, input, settleRemarks(input, a), { quote, updatedAt: t, attachments: this.bindAttachments(input.attachments, a.attachments, a.id) })
         this.audit(db, '编辑账号', `${a.accountNo}`)
         return this.adminView(db, a)
       }
       if (!['draft', 'listed', 'off', 'held'].includes(input.status)) throw new ApiError('新增账号状态只能为草稿 / 空闲可租 / 已下架 / 已回收持有')
       this.bumpAccountSeq(db)
-      const a: Account = { ...input, attachments: this.bindAttachments(input.attachments, [], `a${db.seq.account}`), id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
+      const a: Account = { ...input, ...settleRemarks(input), attachments: this.bindAttachments(input.attachments, [], `a${db.seq.account}`), id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
       db.accounts.unshift(a)
       this.audit(db, '新增账号', `${a.accountNo}（${ACCOUNT_STATUS_LABEL[a.status]}）`)
       return this.adminView(db, a)
@@ -443,20 +458,46 @@ export class LocalApi implements Api {
 
   // ---------- 订单 ----------
   private reminderOf(db: Db, o: RentalOrder): OrderView['reminder'] {
-    if (o.status !== 'active') return null
     const left = new Date(o.endAt).getTime() - this.clock()
-    if (left < 0) return 'overdue'
-    if (left <= db.pricingRule.expiryRemindHours * 3600000) return 'expiring'
+    if (o.status === 'active') {
+      if (left < 0) return 'overdue'
+      if (left <= db.pricingRule.expiryRemindHours * 3600000) return 'expiring'
+      return null
+    }
+    if (o.status === 'settling' && !o.returned && left < 0) return 'overdue'
     return null
+  }
+  /** 与后端 Engine.sweepExpiredOrders 相同：超期的租赁中订单转入待结算，不自动上架。 */
+  private sweepExpiredOrders(db: Db): number {
+    let n = 0
+    const now = this.clock()
+    const at = new Date(now).toISOString()
+    for (const o of db.orders) {
+      if (o.status !== 'active') continue
+      if (new Date(o.endAt).getTime() >= now) continue
+      o.status = 'settling'
+      const a = db.accounts.find((x) => x.id === o.accountId)
+      if (a && !a.deleted && a.status === 'rented') {
+        a.status = 'settling'
+        a.updatedAt = at
+      }
+      o.events.push({ step: 'expire', note: '租期已到，系统自动转入待结算。尚未确认还号，账号不会自动上架', at, operator: 'system' })
+      db.audit.unshift({ at, actor: 'system', action: '订单到期', summary: `${o.orderNo} 超期自动转入待结算（未还号，不上架）` })
+      db.audit = db.audit.slice(0, 800)
+      n++
+    }
+    return n
   }
   async listOrders(): Promise<OrderView[]> {
     this.need('orders')
     const db = this.load()
+    if (this.sweepExpiredOrders(db)) this.save(db)
     return clone(db.orders).map((o) => this.orderView(db, o))
   }
   async getOrder(id: string): Promise<OrderView> {
     this.need('orders')
     const db = this.load()
+    if (this.sweepExpiredOrders(db)) this.save(db)
     const o = db.orders.find((x) => x.id === id)
     if (!o) throw new ApiError('订单不存在', 404, 'NOT_FOUND')
     return this.orderView(db, clone(o))
@@ -537,7 +578,7 @@ export class LocalApi implements Api {
   }
   async markHandover(id: string, note = '') {
     return this.orderOp(id, (_db, o, u) => {
-      if (o.status !== 'active' || o.handedOver) throw new ApiError('当前不能登记交号')
+      if (o.handedOver || (o.status !== 'active' && o.status !== 'settling')) throw new ApiError('当前不能登记交号')
       o.handedOver = true
       this.event(o, 'handover', note || '已交号', u.username)
     }, '订单交号')
@@ -564,6 +605,7 @@ export class LocalApi implements Api {
   async markReturned(id: string, note = '') {
     return this.orderOp(id, (_db, o, u) => {
       if (o.status !== 'settling' || o.returned) throw new ApiError('到期后才能登记还号')
+      if (!o.handedOver) throw new ApiError('请先登记交号，再登记还号', 409, 'INVALID_TRANSITION')
       o.returned = true
       this.event(o, 'return', note || '已还号', u.username)
     }, '订单还号')
@@ -591,7 +633,9 @@ export class LocalApi implements Api {
   }
   async completeOrder(id: string, relist: boolean, note = '') {
     return this.orderOp(id, (db, o, u) => {
-      if (o.status !== 'settling') throw new ApiError('只有待结算的订单可以完成')
+      if (o.status !== 'settling') throw new ApiError('只有待结算的订单可以完成', 409, 'INVALID_TRANSITION')
+      const missing = [!o.handedOver ? '交号' : '', !o.returned ? '还号' : ''].filter(Boolean)
+      if (missing.length) throw new ApiError(`请先登记${missing.join('和')}，确认账号已回到手中后再完成结算。未确认还号不能把账号放回上架。`, 409, 'INVALID_TRANSITION')
       if (depositBalance(o) !== 0 && !note.trim()) throw new ApiError('押金余额不为 0，请先处理或填写不退还原因')
       if (this.orderPayableBalance(db, o) !== 0 && !note.trim()) throw new ApiError('号主应付未结清，请先付款或填写说明（如月结）')
       o.status = 'done'
@@ -697,7 +741,7 @@ export class LocalApi implements Api {
         a = this.findAccount(db, r.sourceAccountId)
         if (a.status === 'rented' || a.status === 'settling') throw new ApiError('该账号仍在租赁 / 待结算中，结算后再成交')
         Object.assign(a, { formerOwnerId: a.ownerId, ownerId: undefined, source: 'buyin', costAmount: r.staffPrice ?? 0, status: 'held', ownerContact: '自有', updatedAt: t,
-          remark: [a.remark, `号主转回收 ${r.requestNo}，成交价 ${r.staffPrice} 元`].filter(Boolean).join('；') })
+          internalRemark: [a.internalRemark, `号主转回收 ${r.requestNo}，成交价 ${r.staffPrice} 元`].filter(Boolean).join('；') })
       } else {
         const s = r.asset
         const input: AccountInput = {
@@ -706,7 +750,8 @@ export class LocalApi implements Api {
           rank: s.rank, safeBox: s.safeBox, stamina: '1级', load: '1级', awmCount: s.awmCount, helmet6Count: s.helmet6Count,
           armor6Count: s.armor6Count, experienceCardCount: s.experienceCardCount, skins: [...s.skins],
           cycle: db.pricingRule.ownerDefaults.cycle, coinRatio: db.pricingRule.ownerDefaults.coinRatio,
-          discountMode: 'system', deposit: db.pricingRule.defaultDeposit, remark: `回收入库，来源 ${r.requestNo}，成交价 ${r.staffPrice} 元`,
+          discountMode: 'system', deposit: db.pricingRule.defaultDeposit, remark: '',
+          internalRemark: `回收入库，来源 ${r.requestNo}，成交价 ${r.staffPrice} 元`,
         }
         this.bumpAccountSeq(db)
         a = { ...input, attachments: [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote: calcPricing(toPricingInput(input), db.pricingRule), createdAt: t, updatedAt: t }
@@ -777,6 +822,7 @@ export class LocalApi implements Api {
   async dashboard(now = new Date(this.clock())): Promise<DashboardStats> {
     this.need('dashboard')
     const db = this.load()
+    if (this.sweepExpiredOrders(db)) this.save(db)
     const acc = db.accounts.filter((a) => !a.deleted)
     const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     const startWeek = startToday - ((now.getDay() + 6) % 7) * DAY

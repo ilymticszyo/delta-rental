@@ -85,7 +85,10 @@ export interface Account {
   discountMode: DiscountMode
   customDiscountPercent?: number
   deposit: number
+  /** 对外备注：大厅、详情可见，参与大厅搜索 */
   remark: string
+  /** 内部备注：仅客服 / 运营 / 管理员可见，不会出现在大厅 */
+  internalRemark: string
   quote: PricingResult // 按保存时规则生成的报价快照
   deleted?: boolean
   createdAt: string
@@ -101,8 +104,9 @@ export interface AccountAdminView extends Account {
   ownerName?: string
 }
 
-/** 前台大厅 / 详情视图：按角色裁剪字段 */
-export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount' | 'deposit' | 'coinRatio' | 'discountMode'> & {
+/** 前台大厅 / 详情视图：按角色裁剪字段。internalRemark 仅员工响应里出现 */
+export type LobbyAccount = Omit<Account, 'quote' | 'ownerContact' | 'ownerId' | 'formerOwnerId' | 'costAmount' | 'deposit' | 'coinRatio' | 'discountMode' | 'internalRemark'> & {
+  internalRemark?: string // 仅客服 / 运营 / 管理员
   deposit?: number // 号主视图不含（下同）
   coinRatio?: number
   discountMode?: Account['discountMode']

@@ -45,7 +45,8 @@
 4. **配置 /api 反向代理**：网站 → 该站点 → 反向代理 → 创建
    - 名称 `api`，**前端请求路径 `/api`**
    - 后端代理地址：后端服务地址，如 `http://127.0.0.1:8080`。如果后端也是 1Panel 里的容器，就用宿主机端口或容器名。**末尾不要带 `/`**，这样 `/api` 前缀原样转给后端；后端路由本身就是 `/api/...`。
-   - 保存后，到"源文"里确认代理块有 `proxy_set_header X-Forwarded-For` 和 `X-Forwarded-Proto`（1Panel 默认会带）。后端要用它们记录真实 IP、判断 https。
+   - 保存后，到"源文"里确认代理块有 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 和 `X-Forwarded-Proto`（1Panel 默认会带）。后端用它们识别真实 IP、判断 https。
+   - 后端环境变量 `TRUST_PROXY` 默认是 `loopback,uniquelocal`：只相信从本机或内网（含 Docker 网桥）连上来的代理所写的 `X-Forwarded-For`。按本文把 API 放在反代后面、且不对公网开放 API 端口时，**不用改这个值**。不要设成 `true`。如果反代不在本机也不在内网，再把 `TRUST_PROXY` 设成那台代理的 IP，或设成 `1`（只信任一层，且必须保证 API 端口没有对公网开放）。
 
 5. **补充配置**：网站 → 该站点 → 配置文件，在 `server { … }` 内加入以下内容（对应 `deploy/nginx.conf` 中的配置）：
    ```nginx

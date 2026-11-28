@@ -42,6 +42,8 @@ model Renter {
   note        String  @default("")
 }
 
+/// payload.remark 是对外备注（大厅可见）；payload.internalRemark 仅员工可见。
+/// 20261128030000 把旧 remark 迁入 internalRemark，对外清空。
 model Account {
   id            String   @id
   accountNo     String   @unique

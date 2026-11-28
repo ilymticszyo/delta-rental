@@ -35,7 +35,7 @@ describe('模板', () => {
     const r = parseImport(aoa, await ctx())
     expect(r.headerErrors).toEqual([])
     expect(r.valid).toBe(1)
-    expect(r.rows[0].input).toMatchObject({ accountNo: 'DF20001', status: 'draft', source: 'consign', region: 'QQ区', safeBox: 6, skins: ['威龙·赤焰', '金色AWM'] })
+    expect(r.rows[0].input).toMatchObject({ accountNo: 'DF20001', status: 'draft', source: 'consign', region: 'QQ区', safeBox: 6, skins: ['威龙·赤焰', '金色AWM'], remark: '', internalRemark: '示例行，导入前请删除' })
     const help = XLSX.utils.sheet_to_json<string[]>(wb.Sheets['填写说明'], { header: 1 })
     expect(help.find((x) => x[0] === '大区')?.[2]).toContain('QQ区 / VX区')
   })
