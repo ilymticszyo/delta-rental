@@ -9,14 +9,16 @@
           <el-menu-item index="/pricing">出租算价</el-menu-item>
           <el-menu-item index="/recycle">回收估值</el-menu-item>
           <el-menu-item index="/contact">客服中心</el-menu-item>
-          <el-menu-item v-if="canOwner" index="/owner/accounts">我的账号</el-menu-item>
-          <el-menu-item v-if="user?.role === 'owner'" index="/owner/list">上架</el-menu-item>
+          <el-menu-item v-if="frontLogin && canOwner" index="/owner/accounts">我的账号</el-menu-item>
+          <el-menu-item v-if="frontLogin && user?.role === 'owner'" index="/owner/list">上架</el-menu-item>
         </el-menu>
         <div class="user">
           <router-link v-if="user && can(user.role, 'adminArea')" to="/admin" class="adm">后台管理</router-link>
           <RoleSwitcher v-if="demo" dark />
-          <span>{{ user?.displayName }}</span>
-          <el-button size="small" text style="color:#cfd3da" @click="logout">退出</el-button>
+          <template v-if="user">
+            <span>{{ user.displayName }}</span>
+            <el-button size="small" text style="color:#cfd3da" @click="logout">退出</el-button>
+          </template>
         </div>
       </div>
     </header>
@@ -29,7 +31,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../../api'
 import { can } from '../../domain/permissions'
 import RoleSwitcher from '../../components/RoleSwitcher.vue'
+import { ENABLE_FRONT_LOGIN } from '../../config/frontLogin'
 const demo = api.features().demo
+const frontLogin = ENABLE_FRONT_LOGIN
 const route = useRoute()
 const router = useRouter()
 const user = api.currentUser()
@@ -39,7 +43,7 @@ const active = computed(() => {
   if (route.path.startsWith('/owner')) return '/owner/accounts'
   return '/' + (route.path.split('/')[1] || 'accounts')
 })
-async function logout() { await api.logout(); router.replace('/login') }
+async function logout() { await api.logout(); router.replace(frontLogin ? '/login' : '/accounts') }
 </script>
 <style scoped>
 .top { background: #141a22; }

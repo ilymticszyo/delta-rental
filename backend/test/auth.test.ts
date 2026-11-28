@@ -43,9 +43,15 @@ describe('登录', () => {
     cs.enabled = false
     await assert.rejects(eng.login(cs, 'cs123', same), /停用/)
   })
-  it('未登录不能访问前台', () => {
+  it('未登录访客按成员权限看前台：可见租金，不见抽成；提交回收仍须登录', () => {
     const { db, eng } = setup()
-    assert.throws(() => eng.listListedAccounts(db, null), (e: unknown) => e instanceof ApiError && e.code === 401)
+    const [a] = eng.listListedAccounts(db, null)
+    assert.ok((a.quote?.totalAmount ?? 0) > 0)
+    assert.equal(a.quote?.serviceFee, undefined)
+    assert.equal(a.quote?.ownerSettlement, undefined)
+    assert.equal(a.ownerContact, undefined)
+    assert.ok(eng.listCsAgents(db, null).length > 0)
+    assert.throws(() => eng.myRecycles(db, null), (e: unknown) => e instanceof ApiError && e.code === 401)
   })
 })
 
@@ -94,13 +100,14 @@ describe('五档权限', () => {
     assert.throws(() => eng.ownerAccount(db, as('owner2'), rented!.id), /无权/)
     assert.equal(eng.getAccount(db, as('owner2'), rented!.id), undefined)
   })
-  it('客服排班需要登录', () => {
+  it('客服排班对访客开放', () => {
     const { db, eng, as } = setup()
-    assert.throws(() => eng.listCsAgents(db, null), (e: unknown) => e instanceof ApiError && e.code === 401)
+    assert.ok(eng.listCsAgents(db, null).length > 0)
     const morning = new Date(2026, 10, 27, 10, 0, 0)
     assert.equal(morning.getDay(), 5)
-    const agent = eng.currentCsAgent(db, as('demo'), morning)
+    const agent = eng.currentCsAgent(db, null, morning)
     assert.equal(agent?.name, '客服小鹿')
+    assert.equal(eng.currentCsAgent(db, as('demo'), morning)?.name, '客服小鹿')
   })
 })
 

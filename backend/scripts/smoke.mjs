@@ -29,8 +29,9 @@ if (meta.status !== 200 || meta.json?.demo !== true || !meta.json.serverTime?.en
 else ok('meta')
 
 const anon = await req('/api/lobby/accounts')
-if (anon.status !== 401 || anon.json?.error?.code !== 'UNAUTHENTICATED') fail(`anon ${anon.status} ${anon.text}`)
-else ok('anon 401')
+const aq = anon.json?.items?.[0]?.quote
+if (anon.status !== 200 || (anon.json?.items?.length && (!(aq?.totalAmount > 0) || aq.serviceFee != null || aq.ownerSettlement != null || anon.json.items[0].ownerContact != null))) fail(`anon ${anon.status} ${anon.text}`)
+else ok('anon lobby (member redaction)')
 
 const bad = await req('/api/auth/login', { method: 'POST', body: { username: 'admin', password: 'wrong' } })
 if (bad.status !== 401 || bad.json?.error?.code !== 'INVALID_CREDENTIALS') fail(`bad password ${bad.text}`)

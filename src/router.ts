@@ -2,6 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import { api } from './api'
 import { can, type Cap } from './domain/permissions'
 import type { Role } from './domain/types'
+import { ENABLE_FRONT_LOGIN } from './config/frontLogin'
 
 export function homeOf(role: Role) {
   if (role === 'owner') return '/owner/accounts'
@@ -13,7 +14,9 @@ export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/accounts' },
-    { path: '/login', component: () => import('./views/Login.vue'), meta: { public: true } },
+    ENABLE_FRONT_LOGIN
+      ? { path: '/login', component: () => import('./views/Login.vue'), meta: { public: true } }
+      : { path: '/login', redirect: '/accounts' },
     {
       path: '/',
       component: () => import('./views/front/FrontLayout.vue'),
@@ -56,10 +59,23 @@ export const router = createRouter({
 })
 
 router.beforeEach((to) => {
+  if (!ENABLE_FRONT_LOGIN && to.path.startsWith('/owner')) return { path: '/accounts' }
   if (to.meta.public) return
   const user = api.currentUser()
   const isAdmin = to.matched.some((r) => r.meta.admin)
-  if (!user) return { path: isAdmin ? '/admin/login' : '/login', query: { redirect: to.fullPath } }
+  if (!user) {
+    if (isAdmin) return { path: '/admin/login', query: { redirect: to.fullPath } }
+    if (!ENABLE_FRONT_LOGIN) {
+      const caps = to.matched.flatMap((r) => {
+        const c = r.meta.cap as Cap | Cap[] | undefined
+        if (!c) return []
+        return Array.isArray(c) ? c : [c]
+      })
+      if (caps.every((c) => c === 'front')) return
+      return { path: '/accounts' }
+    }
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
   for (const r of to.matched) {
     const c = r.meta.cap as Cap | Cap[] | undefined
     if (!c) continue

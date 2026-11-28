@@ -17,7 +17,7 @@
           <template #header><span class="card-title">估值结果</span></template>
           <el-result v-if="submitted" icon="success" title="已提交回收申请" :sub-title="`单号 ${submitted.requestNo}，当前状态：${RECYCLE_STATUS_LABEL[submitted.status]}。客服会尽快联系你。`">
             <template #extra><el-button @click="submitted = null; res = null">再估一个</el-button>
-              <el-button v-if="isOwner" type="primary" @click="$router.push('/owner/accounts')">回到我的账号</el-button></template>
+              <el-button v-if="frontLogin && isOwner" type="primary" @click="$router.push('/owner/accounts')">回到我的账号</el-button></template>
           </el-result>
           <el-empty v-else-if="!res" description="填写资产后点击「估价」" />
           <template v-else>
@@ -44,10 +44,11 @@
               </el-table>
             </div>
             <p class="muted">价格仅供参考，以人工确认为准。</p>
-            <el-button type="success" style="width:100%" @click="submit">确认提交回收申请</el-button>
+            <el-button v-if="canSubmit" type="success" style="width:100%" @click="submit">确认提交回收申请</el-button>
+            <el-alert v-else type="info" :closable="false" show-icon style="margin-top:8px" title="提交回收请联系客服，可到「客服中心」扫码咨询。" />
           </template>
         </el-card>
-        <el-card shadow="never" style="margin-top:12px" header="我的回收申请">
+        <el-card v-if="canSubmit" shadow="never" style="margin-top:12px" header="我的回收申请">
           <el-table :data="mine" size="small" empty-text="暂无">
             <el-table-column prop="requestNo" label="单号" width="90" />
             <el-table-column label="参考价"><template #default="{ row }">{{ row.result.rejected ? '人工评估' : `${row.result.min}-${row.result.max}` }}</template></el-table-column>
@@ -68,9 +69,13 @@ import { blankAsset } from '../../domain/assetDefaults'
 import { RECYCLE_STATUS_LABEL, type RecycleRequest, type RecycleStatus, type ValuationResult } from '../../domain/types'
 import { fmtTime, run, statusTagType } from '../../utils'
 import AssetForm from '../../components/AssetForm.vue'
+import { ENABLE_FRONT_LOGIN } from '../../config/frontLogin'
 
 const route = useRoute()
-const isOwner = api.currentUser()?.role === 'owner'
+const user = api.currentUser()
+const isOwner = user?.role === 'owner'
+const canSubmit = !!user
+const frontLogin = ENABLE_FRONT_LOGIN
 const f = reactive(blankAsset())
 const formRef = ref<{ validate: () => Promise<boolean> }>()
 const res = ref<ValuationResult | null>(null)
@@ -89,6 +94,7 @@ async function submit() {
   if (r) { submitted.value = r; mine.value = await api.myRecycles() }
 }
 onMounted(async () => {
+  if (!user) return
   const from = route.query.fromAccount as string | undefined
   if (from) {
     const draft = await run(() => api.ownerRecycleDraft(from))

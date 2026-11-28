@@ -102,6 +102,14 @@ function isPublic(req: Request) {
   if (req.method === 'GET' && /^\/api\/uploads\/[a-f0-9]{32}\/content$/.test(req.path)) return true
   return false
 }
+/** 前台浏览 / 算价 / 估值 / 客服：未登录可访问（按成员权限裁剪）；有有效令牌时仍按登录角色裁剪 */
+function isGuestOk(req: Request) {
+  const p = req.path
+  if (req.method === 'GET' && (p === '/api/lobby/accounts' || /^\/api\/lobby\/accounts\/[^/]+$/.test(p))) return true
+  if (req.method === 'GET' && (p === '/api/pricing/options' || p === '/api/dicts' || p === '/api/cs-agents' || p === '/api/cs-agents/current')) return true
+  if (req.method === 'POST' && (p === '/api/pricing/quote' || p === '/api/valuation/quote')) return true
+  return false
+}
 
 app.use(async (req, res, next) => {
   try {
@@ -113,11 +121,13 @@ app.use(async (req, res, next) => {
     const now = new Date()
     if (!session || session.expiresAt < now || session.absoluteExpiresAt < now) {
       if (session) await prisma.session.delete({ where: { tokenHash } }).catch(() => undefined)
+      if (isGuestOk(req)) { req.user = null; return next() }
       return sendError(res, 401, 'UNAUTHENTICATED', '登录已失效，请重新登录')
     }
     const row = await prisma.user.findUnique({ where: { username: session.username } })
     if (!row || !row.enabled) {
       await prisma.session.deleteMany({ where: { username: session.username } })
+      if (isGuestOk(req)) { req.user = null; return next() }
       return sendError(res, 401, 'UNAUTHENTICATED', '登录已失效，请重新登录')
     }
     const slide = new Date(Math.min(now.getTime() + SLIDE, session.absoluteExpiresAt.getTime()))
@@ -297,7 +307,7 @@ app.get('/api/auth/me', wrap(async (req, res) => {
 }))
 
 app.get('/api/lobby/accounts', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   let items = await readDb((db) => engine.listListedAccounts(db, u))
   const region = qstr(req.query.region), channel = qstr(req.query.channel), rank = qstr(req.query.rank)
   const safeBox = req.query.safeBox == null || req.query.safeBox === '' ? undefined : Number(req.query.safeBox)
@@ -312,7 +322,7 @@ app.get('/api/lobby/accounts', wrap(async (req, res) => {
     if (safeBox != null && a.safeBox !== safeBox) return false
     if (minCoin != null && Number(a.coinAmount) < minCoin) return false
     if (maxCoin != null && Number(a.coinAmount) > maxCoin) return false
-    if (u.role !== 'owner' && maxTotal != null) {
+    if (u?.role !== 'owner' && maxTotal != null) {
       const total = (a.quote as { totalAmount?: number } | null)?.totalAmount
       if (total == null || total > maxTotal) return false
     }
@@ -326,28 +336,27 @@ app.get('/api/lobby/accounts', wrap(async (req, res) => {
   res.json(present(pageOf(items, req.query)))
 }))
 app.get('/api/lobby/accounts/:id', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   const row = await readDb((db) => engine.getAccount(db, u, req.params.id))
   if (!row) throw new ApiError('账号不存在', 404, false, 'NOT_FOUND')
   res.json(present(row))
 }))
 app.get('/api/pricing/options', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   res.json(await readDb((db) => engine.pricingOptions(db, u)))
 }))
 app.post('/api/pricing/quote', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   if (req.body?.deposit != null) assertMoney(req.body.deposit, 'deposit')
   const input = { ...req.body } as PricingInput
   delete (input as { renterRegular?: boolean }).renterRegular
   res.json(await readDb((db) => engine.calcPricing(db, u, input)))
 }))
 app.post('/api/valuation/quote', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   res.json(await readDb((db) => engine.calcValuation(db, u, req.body as ValuationInput)))
 }))
 app.get('/api/dicts', wrap(async (req, res) => {
-  requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
   const { dicts } = await import('./domain/rules')
   res.json({
     regions: dicts.regions, loginMethods: dicts.loginMethods, ranks: dicts.ranks, safeBoxes: dicts.safeBoxes,
@@ -355,11 +364,11 @@ app.get('/api/dicts', wrap(async (req, res) => {
   })
 }))
 app.get('/api/cs-agents', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   res.json(await readDb((db) => engine.listCsAgents(db, u)))
 }))
 app.get('/api/cs-agents/current', wrap(async (req, res) => {
-  const u = requireRoles(req, ['owner', 'member', 'cs', 'ops', 'admin'])
+  const u = actor(req)
   res.json({ agent: await readDb((db) => engine.currentCsAgent(db, u)) })
 }))
 

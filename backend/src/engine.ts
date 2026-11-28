@@ -96,6 +96,10 @@ export class Engine {
     if (!can(user.role, cap)) throw new ApiError('无权限（403）', 403)
     return user
   }
+  /** 未登录访客按成员权限浏览前台（可见租金，不见抽成 / 号主信息） */
+  private visitor(user: User | null): User {
+    return user ?? { username: 'guest', displayName: '访客', role: 'member' }
+  }
   private actor(user: User | null): User {
     if (!user) throw new ApiError('未登录', 401)
     return user
@@ -222,18 +226,18 @@ export class Engine {
 
   // ---------- 前台 ----------
   listListedAccounts(db: Db, user: User | null) {
-    const u = this.need(user, 'front')
+    const u = this.visitor(user)
     return db.accounts.filter((a) => a.status === 'listed' && !a.deleted).map((a) => lobbyAccountFor(u.role, clone(a)))
   }
   getAccount(db: Db, user: User | null, id: string) {
-    const u = this.need(user, 'front')
+    const u = this.visitor(user)
     const a = db.accounts.find((x) => x.id === id && !x.deleted)
     if (!a) return undefined
     if (!can(u.role, 'inventoryView') && a.status !== 'listed') return undefined
     return lobbyAccountFor(u.role, clone(a))
   }
   pricingOptions(db: Db, user: User | null) {
-    this.need(user, 'front')
+    this.visitor(user)
     const r = db.pricingRule
     return {
       version: r.version,
@@ -245,12 +249,12 @@ export class Engine {
     }
   }
   calcPricing(db: Db, user: User | null, input: PricingInput) {
-    const u = this.need(user, 'front')
+    const u = this.visitor(user)
     const regular = this.renterTag(db, input.renterContact) === 'regular'
     return pricingFor(u.role, pricing({ ...input, renterRegular: regular }, db.pricingRule))
   }
   calcValuation(db: Db, user: User | null, input: ValuationInput) {
-    this.need(user, 'front')
+    this.visitor(user)
     return valuation(input, db.valuationRule)
   }
   submitRecycle(db: Db, user: User | null, input: ValuationInput, opts: { sourceAccountId?: string } = {}) {
@@ -286,14 +290,14 @@ export class Engine {
     return clone(db.recycles.filter((r) => r.submitter === actor.username))
   }
   currentCsAgent(db: Db, user: User | null, now = new Date(this.clock())) {
-    this.need(user, 'front')
+    this.visitor(user)
     const wd = now.getDay()
     const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
     const on = db.csAgents.find((a) => !a.isFallback && a.schedule.some((s) => s.weekdays.includes(wd) && hm >= s.start && hm < s.end))
     return clone(on ?? db.csAgents.find((a) => a.isFallback) ?? null)
   }
   listCsAgents(db: Db, user: User | null) {
-    this.need(user, 'front')
+    this.visitor(user)
     return clone(db.csAgents)
   }
 

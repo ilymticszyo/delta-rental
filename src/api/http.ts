@@ -13,6 +13,7 @@ import { isRetryable } from './idempotency'
 import { ApiError, type FieldError } from './errors'
 import type { Api, ApiFeatures, AuditLog, DemoAccount, ImportOutcome, OrderPreview, OrderView, OwnerListingInput, PayableFilter, PricingOptions, PricingRuleConfirm, PricingRuleSaveResult, SubmitOptions } from './types'
 import type { PricingRulePreview } from '../domain/reprice'
+import { ENABLE_FRONT_LOGIN } from '../config/frontLogin'
 
 export interface TokenStore { get(): string | null; set(token: string | null): void }
 /** 默认 token 存 localStorage（见契约「鉴权」一节的取舍说明） */
@@ -59,8 +60,12 @@ export function defaultUnauthorized() {
   if (typeof window === 'undefined') return
   const cur = window.location.hash.replace(/^#/, '') || '/'
   if (/^\/(admin\/)?login/.test(cur)) return
-  const target = cur.startsWith('/admin') ? '/admin/login' : '/login'
-  window.location.hash = `#${target}?redirect=${encodeURIComponent(cur)}&expired=1`
+  if (cur.startsWith('/admin')) {
+    window.location.hash = `#/admin/login?redirect=${encodeURIComponent(cur)}&expired=1`
+    return
+  }
+  if (!ENABLE_FRONT_LOGIN) return
+  window.location.hash = `#/login?redirect=${encodeURIComponent(cur)}&expired=1`
 }
 
 function dataUrlToBlob(dataUrl: string): Blob {
@@ -188,10 +193,13 @@ export class HttpApi implements Api {
   // ---------- 启动 / 认证 ----------
   async init() {
     this.meta = await this.request<Meta>('GET', '/meta', { auth: 'probe' }).catch(() => ({ version: '', demo: false }))
-    if (!this.tokens.get()) { this.user = null; return }
-    try { this.user = (await this.request<{ user: User }>('GET', '/auth/me', { auth: 'probe' })).user }
-    catch (e) { if (e instanceof ApiError && e.code === 401) { this.tokens.set(null); this.user = null } else throw e }
-    if (this.user) await this.loadDicts()
+    if (this.tokens.get()) {
+      try { this.user = (await this.request<{ user: User }>('GET', '/auth/me', { auth: 'probe' })).user }
+      catch (e) { if (e instanceof ApiError && e.code === 401) { this.tokens.set(null); this.user = null } else throw e }
+    } else {
+      this.user = null
+    }
+    await this.loadDicts()
   }
   /**
    * 字典与渠道 / 周期从服务端读（只读配置）。GET /dicts 是提议接口：后端没有时，ops / admin 退回
@@ -199,9 +207,9 @@ export class HttpApi implements Api {
    */
   private async loadDicts() {
     try {
-      const p = await this.pricingOptions()
+      const p = await this.request<PricingOptions>('GET', '/pricing/options', { auth: 'probe' })
       let d: Partial<Dicts> | null = null
-      try { d = await this.getDicts() }
+      try { d = await this.request<Dicts>('GET', '/dicts', { auth: 'probe' }) }
       catch (e) {
         if (!isNotSupported(e)) throw e
         if (this.user && (this.user.role === 'ops' || this.user.role === 'admin')) {
