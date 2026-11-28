@@ -24,7 +24,7 @@
               </el-upload>
               <div class="muted">最多 5 张，每张 ≤ 1MB（演示版保存在本浏览器）</div>
             </el-form-item>
-            <el-form-item label="备注"><el-input v-model="remark" type="textarea" :rows="2" /></el-form-item>
+            <el-form-item label="内部备注"><el-input v-model="remark" type="textarea" :rows="2" placeholder="只给工作人员看，不会出现在大厅" /></el-form-item>
             <div class="row-gap">
               <el-button size="large" @click="estimate">估算到手</el-button>
               <el-button type="primary" size="large" :disabled="est == null" @click="submit">提交上架（待运营确认）</el-button>

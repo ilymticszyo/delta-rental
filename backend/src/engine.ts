@@ -6,7 +6,7 @@ import { calcPricing, PricingError } from './domain/pricing'
 import { can, type Cap } from './domain/permissions'
 import { buildReport, platformIncome, type ReportDimension } from './domain/reports'
 import { calcValuation, validateValuationInput } from './domain/valuation'
-import { lobbyAccountFor, pricingFor, toOwnerView } from './domain/visibility'
+import { lobbyAccountFor, pricingFor, settleRemarks, toOwnerView } from './domain/visibility'
 import type {
   Account, AccountAdminView, AccountInput, AccountStatus, Attachment, DashboardStats, DepositEntry, OrderEvent, OrderInput, OrderStep,
   OwnerPayableEntry, PricingInput, PricingResult, RecycleRequest, RecycleStatus, RentalOrder, RenterTag, Role, User, ValuationInput,
@@ -194,11 +194,38 @@ export class Engine {
     })
   }
   private reminderOf(db: Db, o: RentalOrder): 'expiring' | 'overdue' | null {
-    if (o.status !== 'active') return null
     const left = new Date(o.endAt).getTime() - this.clock()
-    if (left < 0) return 'overdue'
-    if (left <= db.pricingRule.expiryRemindHours * 3600000) return 'expiring'
+    if (o.status === 'active') {
+      if (left < 0) return 'overdue'
+      if (left <= db.pricingRule.expiryRemindHours * 3600000) return 'expiring'
+      return null
+    }
+    // 超期后转入待结算，但还号未确认：继续标红，避免从看板上消失
+    if (o.status === 'settling' && !o.returned && left < 0) return 'overdue'
     return null
+  }
+  /**
+   * 租期已过、仍是「租赁中」的订单转入待结算，账号从「租赁中」改为「待结算」。
+   * 不登记还号，也不把账号放回上架——还号要人工确认后才能结算上架。
+   * 返回本次转入的订单数。重复调用不会再次改同一单。
+   */
+  sweepExpiredOrders(db: Db): number {
+    let n = 0
+    const now = this.clock()
+    for (const o of db.orders) {
+      if (o.status !== 'active') continue
+      if (new Date(o.endAt).getTime() >= now) continue
+      o.status = 'settling'
+      const a = db.accounts.find((x) => x.id === o.accountId)
+      if (a && !a.deleted && a.status === 'rented') {
+        a.status = 'settling'
+        a.updatedAt = this.nowIso()
+      }
+      this.event(o, 'expire', '租期已到，系统自动转入待结算。尚未确认还号，账号不会自动上架', 'system')
+      this.audit(db, null, '订单到期', `${o.orderNo} 超期自动转入待结算（未还号，不上架）`)
+      n++
+    }
+    return n
   }
   /** 账号报价快照上的规则版本。改规则不改已上架账号的价格；缺快照时用当前规则。 */
   private pricingRuleAt(db: Db, version: number | undefined) {
@@ -220,7 +247,7 @@ export class Engine {
       totalAssets: asset.totalAssets, coinAmount: asset.coinAmount, secretKd: 0, level: asset.level, rank: asset.rank, safeBox: asset.safeBox,
       stamina: '1级', load: '1级', awmCount: asset.awmCount, helmet6Count: asset.helmet6Count, armor6Count: asset.armor6Count,
       experienceCardCount: asset.experienceCardCount, skins: [...asset.skins], cycle: d.cycle, coinRatio: d.coinRatio, discountMode: 'system',
-      deposit: db.pricingRule.defaultDeposit, remark,
+      deposit: db.pricingRule.defaultDeposit, remark: '', internalRemark: remark,
     }
   }
 
@@ -357,6 +384,7 @@ export class Engine {
   // ---------- 库存 ----------
   listAccounts(db: Db, user: User | null) {
     this.need(user, 'inventoryView')
+    this.sweepExpiredOrders(db)
     return db.accounts.filter((a) => !a.deleted).map((a) => this.adminView(db, clone(a)))
   }
   async saveAccount(db: Db, user: User | null, input: AccountInput, store?: DiskAttachmentStore) {
@@ -368,13 +396,13 @@ export class Engine {
     if (input.id) {
       const a = this.findAccount(db, input.id)
       if (input.status !== a.status) throw new ApiError('状态请用状态操作按钮修改')
-      Object.assign(a, input, { quote, updatedAt: t, attachments: shots ?? a.attachments })
+      Object.assign(a, input, settleRemarks(input, a), { quote, updatedAt: t, attachments: shots ?? a.attachments })
       this.audit(db, actor, '编辑账号', `${a.accountNo}`)
       return this.adminView(db, a)
     }
     if (!['draft', 'listed', 'off', 'held'].includes(input.status)) throw new ApiError('新增账号状态只能为草稿 / 空闲可租 / 已下架 / 已回收持有')
     this.bumpAccountSeq(db)
-    const a: Account = { ...input, attachments: shots ?? [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
+    const a: Account = { ...input, ...settleRemarks(input), attachments: shots ?? [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote, createdAt: t, updatedAt: t }
     db.accounts.unshift(a)
     this.audit(db, actor, '新增账号', `${a.accountNo}（${ACCOUNT_STATUS_LABEL[a.status]}）`)
     return this.adminView(db, a)
@@ -439,6 +467,7 @@ export class Engine {
   // ---------- 订单 ----------
   listOrders(db: Db, user: User | null) {
     this.need(user, 'orders')
+    this.sweepExpiredOrders(db)
     return clone(db.orders).map((o) => ({ ...o, reminder: this.reminderOf(db, o), ownerPayableBalance: this.orderPayableBalance(db, o) }))
   }
   previewOrder(db: Db, user: User | null, accountId: string, renterContact: string) {
@@ -499,7 +528,7 @@ export class Engine {
   }
   markHandover(db: Db, user: User | null, id: string, note = '') {
     return this.orderOp(db, user, id, (o, u) => {
-      if (o.status !== 'active' || o.handedOver) throw new ApiError('当前不能登记交号')
+      if (o.handedOver || (o.status !== 'active' && o.status !== 'settling')) throw new ApiError('当前不能登记交号')
       o.handedOver = true
       this.event(o, 'handover', note || '已交号', u.username)
     }, '订单交号')
@@ -526,6 +555,7 @@ export class Engine {
   markReturned(db: Db, user: User | null, id: string, note = '') {
     return this.orderOp(db, user, id, (o, u) => {
       if (o.status !== 'settling' || o.returned) throw new ApiError('到期后才能登记还号')
+      if (!o.handedOver) throw new ApiError('请先登记交号，再登记还号', 409, false, 'INVALID_TRANSITION')
       o.returned = true
       this.event(o, 'return', note || '已还号', u.username)
     }, '订单还号')
@@ -552,7 +582,9 @@ export class Engine {
   }
   completeOrder(db: Db, user: User | null, id: string, relist: boolean, note = '') {
     return this.orderOp(db, user, id, (o, u) => {
-      if (o.status !== 'settling') throw new ApiError('只有待结算的订单可以完成')
+      if (o.status !== 'settling') throw new ApiError('只有待结算的订单可以完成', 409, false, 'INVALID_TRANSITION')
+      const missing = [!o.handedOver ? '交号' : '', !o.returned ? '还号' : ''].filter(Boolean)
+      if (missing.length) throw new ApiError(`请先登记${missing.join('和')}，确认账号已回到手中后再完成结算。未确认还号不能把账号放回上架。`, 409, false, 'INVALID_TRANSITION')
       if (depositBalance(o) !== 0 && !note.trim()) throw new ApiError('押金余额不为 0，请先处理或填写不退还原因', 409, false, 'BALANCE_NOT_SETTLED')
       if (this.orderPayableBalance(db, o) !== 0 && !note.trim()) throw new ApiError('号主应付未结清，请先付款或填写说明（如月结）', 409, false, 'BALANCE_NOT_SETTLED')
       o.status = 'done'
@@ -653,7 +685,7 @@ export class Engine {
       if (a.status === 'rented' || a.status === 'settling') throw new ApiError('该账号仍在租赁 / 待结算中，结算后再成交')
       Object.assign(a, {
         formerOwnerId: a.ownerId, ownerId: undefined, source: 'buyin', costAmount: r.staffPrice ?? 0, status: 'held', ownerContact: '自有', updatedAt: t,
-        remark: [a.remark, `号主转回收 ${r.requestNo}，成交价 ${r.staffPrice} 元`].filter(Boolean).join('；'),
+        internalRemark: [a.internalRemark, `号主转回收 ${r.requestNo}，成交价 ${r.staffPrice} 元`].filter(Boolean).join('；'),
       })
     } else {
       const s = r.asset
@@ -663,7 +695,8 @@ export class Engine {
         rank: s.rank, safeBox: s.safeBox, stamina: '1级', load: '1级', awmCount: s.awmCount, helmet6Count: s.helmet6Count,
         armor6Count: s.armor6Count, experienceCardCount: s.experienceCardCount, skins: [...s.skins],
         cycle: db.pricingRule.ownerDefaults.cycle, coinRatio: db.pricingRule.ownerDefaults.coinRatio,
-        discountMode: 'system', deposit: db.pricingRule.defaultDeposit, remark: `回收入库，来源 ${r.requestNo}，成交价 ${r.staffPrice} 元`,
+        discountMode: 'system', deposit: db.pricingRule.defaultDeposit, remark: '',
+        internalRemark: `回收入库，来源 ${r.requestNo}，成交价 ${r.staffPrice} 元`,
       }
       this.bumpAccountSeq(db)
       a = { ...input, attachments: [], id: `a${db.seq.account}`, accountNo: `DF${db.seq.account}`, quote: pricing(toPricingInput(input), db.pricingRule), createdAt: t, updatedAt: t }
@@ -820,6 +853,7 @@ export class Engine {
   }
   dashboard(db: Db, user: User | null, now = new Date(this.clock())): DashboardStats {
     this.need(user, 'dashboard')
+    this.sweepExpiredOrders(db)
     const acc = db.accounts.filter((a) => !a.deleted)
     // 「今日 / 本周 / 本月」按 Asia/Shanghai（无夏令时，UTC+8），周一为一周起点
     const shifted = new Date(now.getTime() + 8 * 3600000)

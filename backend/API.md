@@ -101,7 +101,7 @@ HTTP 状态与 `code` 相同。常见值：400 参数，401 未登录，403 无�
 | `markReturned` | POST | `/api/admin/orders/:id/returned` | `{ note? }` |
 | `addDepositEntry` | POST | `/api/admin/orders/:id/deposits` | `{ type, amount, reason }`，`type` 为 `collect` / `deduct` / `refund` |
 | `payOwner` | POST | `/api/admin/orders/:id/pay-owner` | `{ amount, note }` |
-| `completeOrder` | POST | `/api/admin/orders/:id/complete` | `{ relist, note? }` |
+| `completeOrder` | POST | `/api/admin/orders/:id/complete` | `{ relist, note? }`。必须已经交号且还号，否则 409，账号不会回到上架 |
 | `cancelOrder` | POST | `/api/admin/orders/:id/cancel` | `{ note? }` |
 | `listPayables` | GET | `/api/admin/payables?ownerId=` | |
 | `renterProfiles` | GET | `/api/admin/renters` | |
@@ -154,4 +154,6 @@ HTTP 状态与 `code` 相同。常见值：400 参数，401 未登录，403 无�
 8. 规则历史接口仍只给元数据。完整快照是上面的 versions 接口。计算当时的版本号已经写在报价和估值结果的 `ruleVersion` 上。
 9. 多了健康检查、OpenAPI、xlsx 文件上传。JSON `aoa` 导入仍然是和 `importAccounts(aoa, fileName)` 对应的那一个。
 10. 被停用的账号如果还拿着旧 token，下一次请求是 401，文案是「该账号已停用」。
-11. 登录失败 10 分钟内超过 30 次会 429。
+11. 登录：同一客户端 IP、同一用户名各自计算，10 分钟内失败满 10 次后返回 429（成功登录会把这两边的计数清掉）。IP 是反代后的真实地址，由环境变量 `TRUST_PROXY` 决定信任哪些来源的 `X-Forwarded-For`，默认只信任本机和内网，不会相信任意客户端自己填的转发头。见 README。
+12. 账号备注分成对外 `remark`（大厅可见、可搜索）和内部 `internalRemark`（只给客服、运营、管理员）。号主、成员和未登录访客的大厅响应里没有内部备注，搜索也匹配不到。数据库里原来的备注已迁移成内部备注。号主上架时填的备注记在内部备注里。
+13. 租期结束仍是「租赁中」的订单，会在打开订单、库存或看板时，以及大约每分钟，自动改成「待结算」，账号从「租赁中」改成「待结算」。不会自动登记还号，也不会自动上架。

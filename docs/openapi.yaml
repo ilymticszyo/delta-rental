@@ -88,8 +88,9 @@ paths:
       operationId: listLobbyAccounts
       summary: 大厅账号（仅 status=listed）
       description: |
-        字段按角色裁剪：owner → quote 为 null，且不含 ownerId/ownerContact/costAmount；member → quote 只含租客应付字段（见 LobbyQuote），
-        不含 ownerId/ownerContact/costAmount；cs/ops/admin → 完整 quote 与号主字段。
+        字段按角色裁剪：owner → quote 为 null，且不含 ownerId/ownerContact/costAmount/internalRemark；member 与未登录访客 → quote 只含租客应付字段（见 LobbyQuote），
+        不含 ownerId/ownerContact/costAmount/internalRemark；cs/ops/admin → 完整 quote、号主字段与内部备注。
+        `q` 只匹配对外备注；内部备注仅员工的搜索会命中。
       x-roles: [owner, member, cs, ops, admin]
       parameters:
         - $ref: '#/components/parameters/page'
@@ -484,7 +485,7 @@ paths:
     post:
       tags: [orders]
       operationId: orderHandover
-      summary: 登记交号（active 且未交号）
+      summary: 登记交号（active，或待结算时补登记；尚未交号）
       x-roles: [cs, ops, admin]
       parameters: [ { $ref: '#/components/parameters/id' } ]
       requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
@@ -520,7 +521,7 @@ paths:
     post:
       tags: [orders]
       operationId: orderReturn
-      summary: 登记还号（settling 且未还号）
+      summary: 登记还号（settling、已交号、尚未还号）
       x-roles: [cs, ops, admin]
       parameters: [ { $ref: '#/components/parameters/id' } ]
       requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/NoteBody' } } } }
@@ -561,7 +562,7 @@ paths:
     post:
       tags: [orders]
       operationId: orderComplete
-      summary: 结算完成（settling → done；押金余额与本单号主应付余额都须为 0，否则必须填 note；账号 → listed（relist）或 off）
+      summary: 结算完成（须已交号且已还号；settling → done；押金余额与本单号主应付余额都须为 0，否则必须填 note；账号 → listed（relist）或 off。未还号不能上架）
       x-roles: [cs, ops, admin]
       parameters: [ { $ref: '#/components/parameters/id' } ]
       requestBody:
@@ -1020,7 +1021,8 @@ components:
         discountMode: { $ref: '#/components/schemas/DiscountMode' }
         customDiscountPercent: { type: number, minimum: 1, maximum: 100, description: discountMode=custom 时必填，且在 customDiscountMin–Max 内 }
         deposit: { $ref: '#/components/schemas/Money' }
-        remark: { type: string, maxLength: 500 }
+        remark: { type: string, maxLength: 500, description: 对外备注，大厅和详情可见，参与大厅搜索 }
+        internalRemark: { type: string, maxLength: 500, description: 内部备注。仅客服/运营/管理员可见；号主、成员、访客的大厅响应不含此字段。未传时新建为空、更新则保留原值。库内旧 remark 已迁移到这里 }
     AccountWrite:
       allOf:
         - { $ref: '#/components/schemas/AccountFields' }
@@ -1104,7 +1106,8 @@ components:
         discountMode: { $ref: '#/components/schemas/DiscountMode' }
         customDiscountPercent: { type: number, description: owner 不返回 }
         deposit: { type: integer, minimum: 0, description: owner 不返回 }
-        remark: { type: string }
+        remark: { type: string, description: 对外备注 }
+        internalRemark: { type: string, description: 内部备注，仅 cs/ops/admin 的响应包含 }
         attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
         quote: { allOf: [ { $ref: '#/components/schemas/LobbyQuote' } ], nullable: true }
         ownerContact: { type: string, description: 仅员工 }
@@ -1331,7 +1334,7 @@ components:
       properties:
         asset: { $ref: '#/components/schemas/ValuationInput' }
         assistTime: { type: string }
-        remark: { type: string, maxLength: 500 }
+        remark: { type: string, maxLength: 500, description: 号主填写的说明，保存为账号内部备注，不出现在大厅 }
         fromRecycleId: { type: string }
         attachmentIds: { type: array, maxItems: 5, items: { type: string } }
 

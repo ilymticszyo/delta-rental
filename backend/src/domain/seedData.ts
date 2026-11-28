@@ -119,6 +119,7 @@ export function seedAccounts(): AccountInput[] {
       customDiscountPercent: custom ? pick([85, 88, 90, 95]) : undefined,
       deposit: pick([0, 0, 100, 200, 300]),
       remark: pick(remarks),
+      internalRemark: '',
     })
     if (buyin) { out[i].costAmount = Math.round(400 + rand() * 1200) }
   }

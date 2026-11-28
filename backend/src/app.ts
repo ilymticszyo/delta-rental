@@ -4,6 +4,8 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import multer, { MulterError } from 'multer'
 import bcrypt from 'bcryptjs'
 import { config } from './config'
+import { createLoginGuard } from './loginGuard'
+import { accountSearchText } from './domain/visibility'
 import type { ReportDimension } from './domain/reports'
 import { demoUsers } from './domain/seedData'
 import type { PricingRule, ValuationRule } from './domain/rules'
@@ -16,8 +18,21 @@ import { openapiYamlPath } from './openapi'
 import { DiskAttachmentStore, safeUploadPath, writeImageBuffer } from './uploads'
 
 const engine = new Engine()
+
+/** 定时把超期仍在租赁中的订单转入待结算。打开订单 / 库存 / 看板时也会扫一次并落库。 */
+export function startExpiredOrderSweep(intervalMs = config.orderSweepMs) {
+  if (!(intervalMs > 0)) return () => undefined
+  const run = () => {
+    writeDb((db) => { engine.sweepExpiredOrders(db); return null }).catch((e) => console.error('超期订单扫描失败', e))
+  }
+  const timer = setInterval(run, intervalMs)
+  timer.unref()
+  run()
+  return () => clearInterval(timer)
+}
 const app = express()
 app.disable('x-powered-by')
+app.set('trust proxy', config.trustProxy)
 app.use(express.json({ limit: '5mb' }))
 
 const imgUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024, files: 1 } })
@@ -79,18 +94,7 @@ function mapError(e: ApiError, login: boolean) {
   return { status: e.code >= 400 && e.code < 500 ? e.code : 422, code: 'VALIDATION_FAILED', message: e.message, fields: e.fields }
 }
 
-const fails = new Map<string, { n: number; t: number }>()
-function hitFail(key: string) {
-  const now = Date.now()
-  const b = fails.get(key)
-  if (!b || now - b.t > 10 * 60 * 1000) { fails.set(key, { n: 1, t: now }); return 1 }
-  b.n += 1
-  return b.n
-}
-function tooMany(key: string) {
-  const b = fails.get(key)
-  return !!b && Date.now() - b.t <= 10 * 60 * 1000 && b.n >= 10
-}
+const loginGuard = createLoginGuard()
 
 function bearer(req: Request) {
   const h = req.headers.authorization
@@ -280,18 +284,18 @@ app.get('/api/meta', wrap(async (_req, res) => {
 
 app.post('/api/auth/login', wrap(async (req, res) => {
   const username = String(req.body?.username ?? '').trim()
-  const ip = req.ip || 'unknown'
-  if (tooMany(`ip:${ip}`) || tooMany(`user:${username}`)) throw new ApiError('登录尝试过于频繁，请稍后再试', 429, false, 'RATE_LIMITED')
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+  if (loginGuard.tooMany(`ip:${ip}`) || loginGuard.tooMany(`user:${username}`)) throw new ApiError('登录尝试过于频繁，请稍后再试', 429, false, 'RATE_LIMITED')
   const row = await prisma.user.findUnique({ where: { username } })
   const dbUser = row ? { username: row.username, password: row.passwordHash, displayName: row.displayName, role: row.role as Role, enabled: row.enabled, ...(row.ownerId ? { ownerId: row.ownerId } : {}) } : null
   let user: User
   try {
     user = await engine.login(dbUser, String(req.body?.password ?? ''), async (hash, plain) => { try { return await bcrypt.compare(plain, hash) } catch { return false } })
   } catch (e) {
-    hitFail(`ip:${ip}`); hitFail(`user:${username}`)
+    loginGuard.hit(`ip:${ip}`); loginGuard.hit(`user:${username}`)
     throw e
   }
-  fails.delete(`ip:${ip}`); fails.delete(`user:${username}`)
+  loginGuard.clear(`ip:${ip}`); loginGuard.clear(`user:${username}`)
   const issued = await issueToken(user.username)
   res.json({ token: issued.token, expiresAt: issued.expiresAt, user })
 }))
@@ -327,8 +331,7 @@ app.get('/api/lobby/accounts', wrap(async (req, res) => {
       if (total == null || total > maxTotal) return false
     }
     if (q) {
-      const blob = `${a.accountNo} ${a.region} ${a.rank} ${a.channel} ${a.remark ?? ''} ${(a.skins as string[]).join(' ')}`.toLowerCase()
-      if (!blob.includes(q)) return false
+      if (!accountSearchText(u?.role, a).toLowerCase().includes(q)) return false
     }
     return true
   })
@@ -455,7 +458,7 @@ app.post('/api/accounts/import', wrap(async (req, res) => {
 }))
 app.get('/api/accounts', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
-  let items = await readDb((db) => engine.listAccounts(db, u))
+  let items = await writeDb((db) => engine.listAccounts(db, u))
   if (qstr(req.query.status)) items = items.filter((a) => a.status === req.query.status)
   if (qstr(req.query.source)) items = items.filter((a) => a.source === req.query.source)
   if (qstr(req.query.ownerId)) items = items.filter((a) => a.ownerId === req.query.ownerId)
@@ -538,7 +541,7 @@ app.get('/api/uploads/:id/content', wrap(async (req, res) => {
 
 app.get('/api/orders', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
-  let items = await readDb((db) => engine.listOrders(db, u))
+  let items = await writeDb((db) => engine.listOrders(db, u))
   if (qstr(req.query.status)) items = items.filter((o) => o.status === req.query.status)
   if (qstr(req.query.reminder)) items = items.filter((o) => o.reminder === req.query.reminder)
   if (qstr(req.query.accountId)) items = items.filter((o) => o.accountId === req.query.accountId)
@@ -570,7 +573,7 @@ app.post('/api/orders', wrap(async (req, res) => {
 }))
 app.get('/api/orders/:id', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
-  const orders = await readDb((db) => engine.listOrders(db, u))
+  const orders = await writeDb((db) => engine.listOrders(db, u))
   const order = orders.find((o) => o.id === req.params.id)
   if (!order) throw new ApiError('订单不存在', 404, false, 'NOT_FOUND')
   res.json(present(order))
@@ -706,7 +709,7 @@ app.get('/api/reports', wrap(async (req, res) => {
 }))
 app.get('/api/dashboard', wrap(async (req, res) => {
   const u = requireRoles(req, ['cs', 'ops', 'admin'])
-  res.json(await readDb((db) => engine.dashboard(db, u)))
+  res.json(await writeDb((db) => engine.dashboard(db, u)))
 }))
 app.get('/api/staff', wrap(async (req, res) => {
   const u = requireRoles(req, ['admin'])

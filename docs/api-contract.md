@@ -35,7 +35,7 @@
   - 有效期 12 小时滑动续期、最长 7 天（可配置），过期返回 401。
 - 启动：前端先调 `GET /api/meta`（免登录），本地有令牌时再调 `GET /api/auth/me` 恢复会话。
 - 401 处理：非登录接口返回 401 → 前端清除令牌并跳转到 `#/login?redirect=…&expired=1`（后台页跳 `#/admin/login`）；登录接口的 401 只提示、不跳转。
-- 登录失败统一 `401 INVALID_CREDENTIALS`（不区分账号不存在 / 密码错误）；停用账号 `403 USER_DISABLED`；同账号或同 IP 连续失败 → `429 RATE_LIMITED`。密码用 argon2id / bcrypt 存储。
+- 登录失败统一 `401 INVALID_CREDENTIALS`（不区分账号不存在 / 密码错误）；停用账号 `403 USER_DISABLED`；同一客户端 IP 或同一用户名在 10 分钟内失败满 10 次 → `429 RATE_LIMITED`（下一次起拒绝，成功登录清零）。IP 取反代后的真实客户端，见后端 `TRUST_PROXY`（默认只信任本机与内网地址发来的 `X-Forwarded-For`，不信任任意来源）。密码用 argon2id / bcrypt 存储。
 
 **为什么选 Bearer 而不是 Cookie：**
 1. 前后端同域、同一个 OpenResty 后面，两种都可行；Bearer 不需要 CSRF 防护（不会被浏览器自动携带），后端实现最简单，也方便后续接小程序 / 脚本 / 第三方工具。
@@ -76,7 +76,7 @@
 
 | 接口 | owner 看到 | member 看到 | 员工（cs/ops/admin） |
 |---|---|---|---|
-| 大厅账号 | 资产字段；`quote: null`；无 `deposit/coinRatio/discountMode/customDiscountPercent/ownerContact/ownerId/costAmount` | 资产 + `quote` 的租客应付部分（无 `serviceFeeRate/serviceFee/ownerSettlement`）；无号主 / 成本字段 | 全部 |
+| 大厅账号 | 资产字段（含对外备注 `remark`）；`quote: null`；无 `deposit/coinRatio/discountMode/customDiscountPercent/ownerContact/ownerId/costAmount/internalRemark` | 资产 + 对外备注 + `quote` 的租客应付部分（无 `serviceFeeRate/serviceFee/ownerSettlement`）；无号主 / 成本 / `internalRemark` | 全部，含内部备注 `internalRemark` |
 | `POST /pricing/quote` | 只有 `{ruleVersion, ownerSettlement}`（= 预计到手） | 去掉 `serviceFeeRate/serviceFee/ownerSettlement` | 完整 `PricingResult` |
 | `GET /pricing/options` | 渠道 / 周期名称、折扣上下限、默认押金（**不含费率**） | 同左 | 同左 |
 | 号主门户 | `OwnerAccountView` 白名单：状态、到期时间 `expireAt`、到手 `takeHome`、回收进度、资产、截图 | 403 | admin：全部 + `ownerName`；cs/ops：403 |
@@ -139,14 +139,16 @@ X-Request-Id: 7f3a9c
 | draft → listed（人工确认上架）/ off（作废） | `POST /accounts/{id}/status` |
 | listed → off；off → listed；held → listed / off | 同上 |
 | listed → rented | `POST /orders`（登记订单） |
-| rented → settling | `POST /orders/{id}/end` |
-| settling → listed / off | `POST /orders/{id}/complete`（`relist`） |
+| rented → settling | `POST /orders/{id}/end`，或租期已过时由服务端自动转入（见下） |
+| settling → listed / off | `POST /orders/{id}/complete`（`relist`；必须已交号且已还号） |
 | rented → listed | `POST /orders/{id}/cancel`（未交号） |
 | 任意寄租号 → held（source 变 buyin） | `POST /recycles/{id}/to-inventory`（号主转回收） |
 
 rented / settling 不能人工改、不能删除、不能编辑状态字段（`PUT` 里 status 必须等于当前值）。
 
-**订单 `OrderStatus`**：`active` → `settling`（end）→ `done`（complete）；`active` → `cancelled`（仅未交号）。active 期间可交号（handover，一次）、改租期（extend）、记押金；settling 期间登记还号（return，一次）、记押金、付号主款。`done / cancelled` 后只读（付号主款在 cancelled 后也禁止）。
+**订单 `OrderStatus`**：`active` → `settling`（end，或结束时间已过由服务端自动转入）→ `done`（complete）；`active` → `cancelled`（仅未交号）。active 期间可交号（handover）、改租期（extend）、记押金；待结算时若漏了交号可以补登记。settling 期间须先有交号才能登记还号（return，一次），并可记押金、付号主款。完成结算必须 **已交号且已还号**，否则 409 `INVALID_TRANSITION`（未还号不能把账号放回上架）。`done / cancelled` 后只读（付号主款在 cancelled 后也禁止）。
+
+超期订单：`endAt` 已过且仍为 `active` 时，打开订单列表 / 订单详情 / 库存列表 / 看板，以及约每分钟的定时任务，会把订单改为 `settling`、账号从 `rented` 改为 `settling`，并记一条系统事件。不会自动登记还号，也不会自动上架。转入后若仍未还号，提醒保持「已超期」。
 生命周期事件 `OrderEvent.step`：`register handover extend collect deduct refund expire return payOwner settle cancel`，每个动作追加一条（含操作人与时间），嵌在订单的 `events` 里返回，**只增不改**。
 
 **押金台账 `DepositEntry`**：`collect` 收 / `deduct` 扣（须写原因）/ `refund` 退；余额 = 收 − 扣 − 退，扣和退不能超过余额。登记订单时押金 > 0 会自动记一笔 collect（熟客免押则为 0）。

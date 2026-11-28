@@ -1,5 +1,6 @@
 import { Prisma, PrismaClient } from '@prisma/client'
 import type { Account, OwnerPayableEntry, RecycleRequest, RentalOrder } from './domain/types'
+import { normalizeAccountRemarks } from './domain/visibility'
 import type { Db, DbUser } from './domain/seedData'
 import { ApiError } from './errors'
 import { DiskAttachmentStore, type StoredUpload } from './uploads'
@@ -37,7 +38,7 @@ export async function loadDb(tx: Tx): Promise<Db> {
     })),
     owners: owners.map((o) => ({ id: o.id, contact: o.contact, displayName: o.displayName, ...(o.userId ? { userId: o.userId } : {}) })),
     renters: renters.map((r) => ({ contact: r.contact, displayName: r.displayName, tag: (r.tag as Db['renters'][number]['tag']) ?? null, note: r.note })),
-    accounts: accounts.map((a) => a.payload as unknown as Account),
+    accounts: accounts.map((a) => normalizeAccountRemarks(a.payload as unknown as Account)),
     orders: orders.map((o) => o.payload as unknown as RentalOrder),
     payables: payables.map((p) => p.payload as unknown as OwnerPayableEntry),
     recycles: recycles.map((r) => r.payload as unknown as RecycleRequest),

@@ -84,8 +84,12 @@ npm run dev
 | `DEMO` | 是否在 `GET /api/meta` 返回演示账号。生产 `false`。也认 `ENABLE_DEMO_ACCOUNTS` |
 | `ENABLE_DEMO_RESET` | 是否允许 `POST /api/demo/reset`。生产 `false` |
 | `NODE_OPTIONS` | 建议 `--max-old-space-size=192` |
+| `TRUST_PROXY` | 登录限流用的客户端 IP 该信任谁。默认 `loopback,uniquelocal`（本机和内网反代，含 Docker 网桥）。公网直连时忽略 `X-Forwarded-For`。可改成跳数 `1`，或逗号分隔的 IP / 网段。**不要**设成 `true` 或 `all` |
+| `ORDER_SWEEP_MS` | 超期订单自动转入待结算的间隔，默认 `60000`（1 分钟）。设为 `0` 则不定时扫；打开订单、库存或看板时仍会扫 |
 
 登录 `POST /api/auth/login` 返回 `{ token, expiresAt, user }`。`token` 是 48 位十六进制不透明串，服务端只存 SHA-256。之后请求带 `Authorization: Bearer <token>`。同域部署，不启用 CORS。
+
+同一 IP 或同一用户名在 10 分钟内登录失败满 10 次，接下来会返回 429，成功登录后清零。前面有 OpenResty / nginx 时，请让它用 `X-Forwarded-For $proxy_add_x_forwarded_for`（仓库里的配置已经这样写）。后端默认只在连接来自本机或内网时才采信这个头，所以部署文档里的反代可以直接用，不必改 `TRUST_PROXY`。如果 API 端口被公网直接访问，伪造的转发头不会当成客户 IP。不要把 `TRUST_PROXY` 设成 `true`。
 
 令牌 12 小时滑动续期，绝对最长 7 天（`SESSION_SLIDE_HOURS`、`SESSION_ABSOLUTE_DAYS`）。退出或停用用户会立刻吊销该用户的全部令牌。截图地址是 1 小时有效的 HMAC 签名 URL，`<img>` 不需要带 Authorization。
 

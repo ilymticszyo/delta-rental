@@ -57,7 +57,8 @@ export const IMPORT_COLUMNS: ImportColumn[] = [
   { key: 'discountMode', header: '折扣方式', required: false, type: 'enum', example: '系统推荐', hint: '系统推荐 / 自定义，默认 系统推荐', options: () => ['系统推荐', '自定义'] },
   { key: 'customDiscountPercent', header: '自定义折扣(%)', required: false, type: 'num', example: '', hint: '折扣方式为自定义时必填，1-100' },
   { key: 'deposit', header: '押金(元)', required: false, type: 'num', example: 0, hint: '默认 0' },
-  { key: 'remark', header: '备注', required: false, type: 'text', example: '示例行，导入前请删除', hint: '' },
+  { key: 'internalRemark', header: '备注', required: false, type: 'text', example: '示例行，导入前请删除', hint: '仅客服、运营、管理员可见，不会出现在大厅' },
+  { key: 'remark', header: '对外备注', required: false, type: 'text', example: '', hint: '大厅和详情可见，可被搜索；留空则不对外展示' },
 ]
 
 /** 模板：表头 + 填写说明行之外的一行示例（数组形式，便于 SheetJS aoa_to_sheet） */
@@ -169,7 +170,7 @@ export function parseImport(aoa: unknown[][], ctx: ImportContext): ImportParseRe
         experienceCardCount: (out.experienceCardCount as number) ?? 0, skins: (out.skins as string[]) ?? [],
         cycle: out.cycle as string, coinRatio: out.coinRatio as number, discountMode: (out.discountMode as 'system' | 'custom') ?? 'system',
         ...(out.discountMode === 'custom' ? { customDiscountPercent: out.customDiscountPercent as number } : {}),
-        deposit: (out.deposit as number) ?? 0, remark: (out.remark as string) ?? '',
+        deposit: (out.deposit as number) ?? 0, remark: (out.remark as string) ?? '', internalRemark: (out.internalRemark as string) ?? '',
       }
     }
     rows.push(res)

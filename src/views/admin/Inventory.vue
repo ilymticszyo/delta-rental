@@ -89,7 +89,8 @@
         <el-col :span="8"><el-form-item label="封禁记录"><el-switch v-model="form.banRecord" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item label="折扣"><el-radio-group v-model="form.discountMode"><el-radio value="system">系统推荐</el-radio><el-radio value="custom">自定义</el-radio></el-radio-group>
           <el-input-number v-if="form.discountMode === 'custom'" v-model="form.customDiscountPercent" :min="80" :max="100" style="width:100px;margin-left:8px" /></el-form-item></el-col>
-        <el-col :span="12"><el-form-item label="备注"><el-input v-model="form.remark" /></el-form-item></el-col>
+        <el-col :span="12"><el-form-item label="对外备注"><el-input v-model="form.remark" placeholder="大厅和详情可见，可被搜索" /></el-form-item></el-col>
+        <el-col :span="12"><el-form-item label="内部备注"><el-input v-model="form.internalRemark" placeholder="仅客服、运营、管理员可见" /></el-form-item></el-col>
       </el-row>
     </el-form>
     <div style="margin-top:8px" class="acc-shots">
@@ -154,7 +155,7 @@ const cycles = computed(() => Object.keys(rule.value?.cycleValues ?? {}))
 
 const blank = (): AccountInput => ({ status: 'draft', source: 'consign', costAmount: 0, ownerContact: '', region: 'QQ区', loginMethod: '扫码', channel: '普通区', assistTime: '全天',
   banRecord: false, totalAssets: 0, coinAmount: 0, secretKd: 1, level: 1, rank: '青铜', safeBox: 4, stamina: '1级', load: '1级', awmCount: 0, helmet6Count: 0,
-  armor6Count: 0, experienceCardCount: 0, skins: [], cycle: '10M/天', coinRatio: 20, discountMode: 'system', customDiscountPercent: 95, deposit: 0, remark: '' })
+  armor6Count: 0, experienceCardCount: 0, skins: [], cycle: '10M/天', coinRatio: 20, discountMode: 'system', customDiscountPercent: 95, deposit: 0, remark: '', internalRemark: '' })
 const form = reactive<AccountInput>(blank())
 const editingNo = ref('')
 const dlg = ref(false)
